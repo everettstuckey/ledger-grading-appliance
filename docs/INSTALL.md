@@ -54,6 +54,7 @@ This procedure is written for a technically qualified operator setting up a dedi
    - **Google AI Studio:** choose **Get API key**. The setup screen will require you to confirm that billing is enabled on the key's project. Google's terms differ for unpaid and paid use; read them and have your institution review them. Keys start with `AQ.` or `AIza`.
    - **Anthropic:** create a key in the Anthropic Console. It starts with `sk-ant-`. Read Anthropic's terms as well.
    - **Azure OpenAI** uses a model deployment and a Microsoft Entra sign-in. Follow the [Azure setup instructions](AZURE_OPENAI.md) before opening Ledger.
+   - **Codex desktop** uses your existing ChatGPT sign-in. Follow the [desktop handoff instructions](CODEX_DESKTOP.md).
 8. Double-click **Start Ledger** on the desktop. The first time, Xfce asks whether to trust the launcher: click **Mark Executable**. It asks once.
 9. On the **SYSTEM INITIALIZATION** screen:
    1. Enter the provider settings. For Azure OpenAI, enter the resource URL and tenant ID.

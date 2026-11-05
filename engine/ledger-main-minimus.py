@@ -4,7 +4,7 @@ import time
 import logging
 import threading
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 import customtkinter as ctk
 import fitz  # PyMuPDF
 from PIL import Image, ImageStat
@@ -26,6 +26,7 @@ import requests
 import decimal
 import math
 import numbers
+from urllib.parse import urlencode
 
 
 # --- [PATCH:score-format] ---------------------------------------------------
@@ -257,6 +258,8 @@ NO_INSTRUCTIONS_LOG = "NO GRADING INSTRUCTIONS — enter them before running"  #
 AI_STUDIO_PREFIXES = ("AQ.", "AIza")
 ANTHROPIC_PREFIX = "sk-ant-"
 DEFAULT_GUI_MODEL = "gemini-3.5-pro-preview"
+CODEX_HANDOFF_PROMPT = "$ledger-grading Process Ledger jobs in this workspace while I run an evaluation batch."
+CODEX_HANDOFF_OCR_TIMEOUT = 330
 AZURE_ENDPOINT = re.compile(
     r"https://[a-z0-9][a-z0-9-]*\.(?:openai\.azure\.com|services\.ai\.azure\.com)/?",
     re.IGNORECASE | re.ASCII,
@@ -275,7 +278,7 @@ WIZARD_SCREEN_ALLOWANCE = 100       # same screen clamp the dashboard uses
 WIZARD_LEVEL_COLORS = {"block": "#c0392b", "warn": "#e67e22", "ready": "#1e8449", "idle": "#7f8c8d"}
 WIZARD_DEFAULT_RULE = (
     "Provide GOOGLE (AI Studio API key, or Project ID + service-account JSON under "
-    "Advanced), ANTHROPIC (API key), or Azure OpenAI (resource URL and Entra tenant ID). "
+    "Advanced), ANTHROPIC (API key), Azure OpenAI (resource URL and Entra tenant ID), or Codex desktop. "
     "At least one complete provider is required."
 )
 WIZARD_BILLING_REQUIRED = "Billing confirmation required for Google AI Studio keys."
@@ -299,7 +302,7 @@ WIZARD_LEGAL_TEXT = (
     "law, and any data-privacy agreement my institution requires.\n\n"
 
     "    2. DATA SENT TO THIRD PARTIES: This software sends images to the AI "
-    "providers I configure (Google, Anthropic, or Azure OpenAI): the blank master pages, "
+    "providers I configure (Google, Anthropic, Azure OpenAI, or Codex): the blank master pages, "
     "a title crop, an ID crop from every page, and either cropped answer boxes "
     "(WORKSHEET mode) or WHOLE PAGES (ESSAY mode). What a provider does with "
     "those images is governed by its terms, which I have read and accept.\n\n"
@@ -355,11 +358,12 @@ BILLING_DISCLOSURE_TEXT = (
 
 
 def wizard_provider_state(ai_key, gcp_id, has_creds, anth_key, billing_confirmed,
-                          azure_endpoint="", azure_tenant=""):
+                          azure_endpoint="", azure_tenant="", codex_enabled=False):
     """Pure provider-completeness rule for the SYSTEM INITIALIZATION wizard.
 
     Google is complete as EITHER an AI Studio key OR (Project ID + service-account
-    JSON), Anthropic as an sk-ant- key, and Azure as an endpoint plus tenant ID.
+    JSON), Anthropic as an sk-ant- key, Azure as an endpoint plus tenant ID,
+    and Codex as an enabled desktop handoff.
     At least one complete provider is required.
     Both Google forms at once -> block (one Google route per box). A half-entered
     Vertex pair -> block. A malformed Anthropic key -> block. An AI Studio key
@@ -394,7 +398,7 @@ def wizard_provider_state(ai_key, gcp_id, has_creds, anth_key, billing_confirmed
     def _out(ok, level, message, use_ai=False, use_vertex=False, use_anth=False):
         return {"ok": ok, "level": level, "message": message, "warnings": warnings,
                 "use_ai_studio": use_ai, "use_vertex": use_vertex, "use_anthropic": use_anth,
-                "use_azure": ok and azure_complete}
+                "use_azure": ok and azure_complete, "use_codex": ok and codex_enabled}
 
     if both_google:
         return _out(False, "block",
@@ -419,7 +423,7 @@ def wizard_provider_state(ai_key, gcp_id, has_creds, anth_key, billing_confirmed
         return _out(False, "block", "Enter both the Azure OpenAI HTTPS resource URL and the Entra tenant GUID.")
 
     google_complete = ai_present or vertex_complete
-    if not (google_complete or anth_complete or azure_complete):
+    if not (google_complete or anth_complete or azure_complete or codex_enabled):
         return _out(False, "idle", WIZARD_DEFAULT_RULE)
 
     names = []
@@ -431,12 +435,18 @@ def wizard_provider_state(ai_key, gcp_id, has_creds, anth_key, billing_confirmed
         names.append("ANTHROPIC (direct API)")
     if azure_complete:
         names.append("Azure OpenAI (Microsoft Entra)")
+    if codex_enabled:
+        names.append("Codex desktop")
     ready = ("Providers ready: " if len(names) > 1 else "Provider ready: ") + " + ".join(names) + "."
     if warnings:
         return _out(True, "warn", ready + " WARNING: " + warnings[0],
                     ai_present, vertex_complete, anth_complete)
     return _out(True, "ready", ready, ai_present, vertex_complete, anth_complete)
 # --- end [PATCH:wizard-devapi] ----------------------------------------------
+
+class CodexHandoffError(RuntimeError):
+    """A desktop OCR failure that leaves the batch pending."""
+
 
 class LedgerGUI:
     def __init__(self, root):
@@ -750,8 +760,13 @@ class LedgerGUI:
                 "image_b64": base64_img
             }
             
-            time.sleep(10) # Network buffer before establishing Silo 1 session
-            response = requests.post("http://127.0.0.1:5000/api/silo1", json=payload, timeout=60)
+            use_codex = payload["model_name"].lower().startswith("codex/")
+            if not use_codex:
+                time.sleep(10) # Network buffer before establishing Silo 1 session
+            timeout = CODEX_HANDOFF_OCR_TIMEOUT if use_codex else 60
+            response = requests.post("http://127.0.0.1:5000/api/silo1", json=payload, timeout=timeout)
+            if use_codex and not self.is_running:
+                return
             
             if response.status_code != 200:
                 raise Exception(f"Daemon HTTP {response.status_code}: {response.text}")
@@ -760,7 +775,10 @@ class LedgerGUI:
             
             if data.get("status") == "success":
                 raw = data["text"].strip().replace('```json', '').replace('```', '').strip()
-                title_data = json_repair.loads(raw)
+                title_data = json.loads(raw) if use_codex else json_repair.loads(raw)
+                if use_codex and (not isinstance(title_data, dict) or not isinstance(title_data.get("assignment_title"), str)
+                                  or not title_data["assignment_title"].strip()):
+                    raise CodexHandoffError("Codex returned an invalid assignment title.")
             else:
                 raise Exception(data.get("message", "Daemon returned an error."))
 
@@ -1006,6 +1024,12 @@ class LedgerGUI:
                 row=row, column=1, pady=4)
         ctk.CTkLabel(azure_frame, text="For Azure, sign in with Azure CLI as the paragon user.",
                      font=note_font).grid(row=2, column=0, columnspan=2, pady=(0, 4))
+
+        codex_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(body, text="Use Codex desktop for evaluation", variable=codex_var,
+                        font=self.main_font).pack(pady=(4, 2))
+        ctk.CTkLabel(body, text="Open the handoff folder in Codex and use synthetic work for evaluation.",
+                     font=note_font).pack(pady=(0, 8))
 
         # One-line provider rule so the operator knows what unlocks the button.
         provider_rule = ctk.CTkLabel(body, text=WIZARD_DEFAULT_RULE, font=note_font,
@@ -1275,7 +1299,7 @@ class LedgerGUI:
                 disc["confirmed_key"] = None
             st = wizard_provider_state(ai_key, gcp_var.get(), creds_state['path'] is not None,
                                         anth_var.get(), billing_var.get() == "on",
-                                        azure_endpoint_var.get(), azure_tenant_var.get())
+                                        azure_endpoint_var.get(), azure_tenant_var.get(), codex_var.get())
             disclosure_btn.configure(state="normal" if ai_key else "disabled")
             provider_rule.configure(text=st["message"], text_color=WIZARD_LEVEL_COLORS[st["level"]])
             has_rep = len(rep_var.get().strip()) > 0
@@ -1287,7 +1311,7 @@ class LedgerGUI:
 
         ai_var.trace_add("write", _on_ai_change)
         ai_entry.bind("<FocusOut>", _on_ai_focus_out)
-        for _v in (anth_var, gcp_var, rep_var, azure_endpoint_var, azure_tenant_var):
+        for _v in (anth_var, gcp_var, rep_var, azure_endpoint_var, azure_tenant_var, codex_var):
             _v.trace_add("write", validate_inputs)
         liability_cb.configure(command=validate_inputs)
 
@@ -1305,11 +1329,13 @@ class LedgerGUI:
             timestamp = datetime.datetime.now().isoformat()
 
             st = wizard_provider_state(ai_key, new_key, creds_state['path'] is not None,
-                                        anth_key, billing_var.get() == "on", azure_endpoint, azure_tenant)
+                                        anth_key, billing_var.get() == "on", azure_endpoint, azure_tenant,
+                                        codex_var.get())
             use_ai = st["use_ai_studio"]
             use_vertex = st["use_vertex"]
             use_anthropic = st["use_anthropic"]
             use_azure = st["use_azure"]
+            use_codex = st["use_codex"]
 
             if st["ok"] and rep_name:
                 # 1. Stage .env, the service-account key (Vertex route only),
@@ -1336,6 +1362,8 @@ class LedgerGUI:
                     if use_azure:
                         f.write(f'LEDGER_AZURE_OPENAI_ENDPOINT="{azure_endpoint}"\n')
                         f.write(f'LEDGER_AZURE_TENANT_ID="{azure_tenant}"\n')
+                    if use_codex:
+                        f.write('LEDGER_CODEX_ENABLED="true"\n')
                 if use_vertex:
                     try:
                         shutil.copy(creds_state['path'], temp_sa)
@@ -1408,7 +1436,8 @@ class LedgerGUI:
                 # 4. Finalizing Log
                 providers = " + ".join(
                     p for p, on in (("GOOGLE (AI Studio)", use_ai), ("GOOGLE (Vertex)", use_vertex),
-                                    ("ANTHROPIC", use_anthropic), ("Azure OpenAI", use_azure)) if on
+                                    ("ANTHROPIC", use_anthropic), ("Azure OpenAI", use_azure),
+                                    ("Codex desktop", use_codex)) if on
                 )
                 if use_ai:
                     self.log_message("Google (AI Studio): billing confirmed by operator")
@@ -1594,7 +1623,9 @@ class LedgerGUI:
         try:
             health = requests.get("http://127.0.0.1:5000/", timeout=1)
             health.raise_for_status()
-            return health.json().get("azure_openai_default_model") or DEFAULT_GUI_MODEL
+            providers = health.json()
+            return (providers.get("codex_default_model") or providers.get("azure_openai_default_model")
+                    or DEFAULT_GUI_MODEL)
         except (requests.RequestException, ValueError):
             return DEFAULT_GUI_MODEL
 
@@ -1637,8 +1668,8 @@ class LedgerGUI:
         """Choose an exact model ID and save it for this user."""
         win = ctk.CTkToplevel(self.root)
         win.title("AI MODEL")
-        win.geometry("640x460")
-        win.minsize(620, 440)
+        win.geometry("680x500")
+        win.minsize(650, 480)
         win.resizable(True, True)
         win.transient(self.root)
 
@@ -1646,6 +1677,7 @@ class LedgerGUI:
         ctk.CTkLabel(
             win,
             text=("Enter the exact model ID.\n"
+                  "Codex desktop: codex/gpt-6.1-sol or codex/gpt-6-astra\n"
                   "Azure: gpt-6.1-sol or gpt-6-astra\n"
                   "Google: gemini-4-argon  |  Anthropic: claude-opus-4-8"),
             font=self.main_font, justify="center"
@@ -1680,7 +1712,38 @@ class LedgerGUI:
         ctk.CTkButton(win, text="SAVE MY MODEL", font=self.header_font, height=46,
                       fg_color="#1e8449", hover_color="#27ae60",
                       command=save_and_close).pack(pady=(18, 0))
+        ctk.CTkButton(win, text="Open Codex app", font=self.main_font,
+                      command=lambda: self.open_codex_handoff(win)).pack(pady=(12, 0))
         self._make_text_copyable(win)
+
+    def open_codex_handoff(self, window):
+        """Open a draft in the Codex desktop app for the configured job folder."""
+        try:
+            response = requests.get("http://127.0.0.1:5000/", timeout=2)
+            response.raise_for_status()
+            job_dir = response.json().get("codex_job_dir")
+        except (requests.RequestException, ValueError):
+            job_dir = None
+        if not job_dir:
+            messagebox.showinfo("Codex desktop", "Enable Codex in Ledger setup and start the Ledger service.", parent=window)
+            return
+
+        link = "codex://new?" + urlencode({"path": job_dir, "prompt": CODEX_HANDOFF_PROMPT})
+        try:
+            handler = subprocess.run(["xdg-mime", "query", "default", "x-scheme-handler/codex"],
+                                     capture_output=True, text=True, timeout=3, check=True)
+            if handler.stdout.strip():
+                subprocess.Popen(["xdg-open", link], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+        except (OSError, subprocess.SubprocessError):
+            pass
+        messagebox.showinfo(
+            "Codex desktop",
+            f"In Codex, open this folder as a project:\n{job_dir}\n\n"
+            "If Codex is on another computer, use its SSH connection to this appliance.\n\n"
+            "Select GPT-6.1 Sol or GPT-6 Astra and send:\n" + CODEX_HANDOFF_PROMPT,
+            parent=window,
+        )
 
     def open_advanced_settings(self):
         """Admin 'danger zone': Factory Reset only. The AI model is now set in ONE
@@ -3236,7 +3299,8 @@ class LedgerGUI:
                 "images_b64": master_parts_b64
             }
             
-            time.sleep(10) # Network buffer before uploading massive cache payload
+            if not payload["model_name"].lower().startswith("codex/"):
+                time.sleep(10) # Network buffer before uploading massive cache payload
             response = requests.post("http://127.0.0.1:5000/api/cache/build", json=payload, timeout=120)
             self._raise_daemon_error(response)
             
@@ -3748,8 +3812,10 @@ class LedgerGUI:
         except Exception as e:
             self.log_message(f"    -> [!] Local Page Number OCR Failed: {e}")
 
-        # --- GEMINI API (BARTONIAN ID ONLY) ---
+        # --- PROVIDER OCR (BARTONIAN ID ONLY) ---
         delay = 15
+        model_name = self.get_silo2_model()
+        use_codex = model_name.lower().startswith("codex/")
         while self.is_running:
             try:
                 # The image is already perfectly cropped by the dynamic coordinates
@@ -3772,24 +3838,29 @@ class LedgerGUI:
                 )
                 
                 payload = {
-                    "model_name": self.get_silo2_model(),
+                    "model_name": model_name,
                     "prompt": prompt,
                     "image_b64": base64_header
                 }
                 
-                response = requests.post("http://127.0.0.1:5000/api/silo1", json=payload, timeout=60)
+                timeout = CODEX_HANDOFF_OCR_TIMEOUT if use_codex else 60
+                response = requests.post("http://127.0.0.1:5000/api/silo1", json=payload, timeout=timeout)
                 self._raise_daemon_error(response)
                 data = response.json()
                 
                 if data.get("status") == "success":
                     raw = data["text"].strip().replace('```json', '').replace('```', '').strip()
-                    silo_data = json_repair.loads(raw)
+                    silo_data = json.loads(raw) if use_codex else json_repair.loads(raw)
+                    if use_codex and (not isinstance(silo_data, dict) or type(silo_data.get("bartonian_id")) is not int):
+                        raise CodexHandoffError("Codex returned an invalid ID transcription.")
                     silo_data["page_num"] = page_num
                     return silo_data
                 else:
                     raise Exception(data.get("message", "Daemon returned an error."))
                 
             except Exception as e:
+                if use_codex:
+                    raise CodexHandoffError(str(e)) from None
                 logging.info(f"[!] Silo 1 Error. Retrying in {delay} seconds... Details: {e}")
                 friendly_err = self._translate_api_error(e)
                 self.root.after(0, self._append_to_gui, f"Silo 1 Status: {friendly_err} (Retrying in {delay}s)")
@@ -3874,7 +3945,8 @@ class LedgerGUI:
         re-run recovers). A small inter-chunk pace avoids self-inflicted 429s."""
         if not chunk_paths:
             return []
-        pace = float(os.environ.get("LEDGER_SILO2_CHUNK_PACING_S", "60"))  # [PATCH:silo2-pacing-60] 8->60; metering not weather; env override still wins
+        use_codex = self.get_silo2_model().lower().startswith("codex/")
+        pace = 0 if use_codex else float(os.environ.get("LEDGER_SILO2_CHUNK_PACING_S", "60"))
         merged = []
         total = len(chunk_paths)
         for idx, cp in enumerate(chunk_paths, 1):
@@ -4389,6 +4461,7 @@ class LedgerGUI:
         global_batch_data = {}
         pdf_to_period_map = {}
         tabula_records_by_eval_dir = {}
+        use_codex = self.get_silo2_model().lower().startswith("codex/")
         
         self.log_message(f"=== INITIATING LEDGER PASS 1: EXTRACTION & CROPPING ({len(pdf_files)} Files) ===")
         
@@ -4434,9 +4507,14 @@ class LedgerGUI:
                     temp_footer_path = os.path.join(TEMP_DIR, f"{safe_pdf_name}-temp-footer-{page_num + 1}.png")
                     cv2.imwrite(temp_footer_path, footer_crop)
 
-                    # 2. Extract Data (Local OCR for Footer, API for ID)
-                    time.sleep(30) # Increased from 15 to 30 to prevent 429 quota exhaustion
+                    # 2. Extract data (local OCR for the footer, provider OCR for the ID)
+                    if not use_codex:
+                        time.sleep(30) # Prevent 429 quota exhaustion
                     silo_data = self.extract_with_silo_1(temp_id_path, temp_footer_path)
+                    if use_codex and not self.is_running:
+                        doc.close()
+                        self.finish_processing()
+                        return
                     
                     if silo_data:
                         b_id = str(silo_data.get("bartonian_id", 0))
@@ -4513,6 +4591,11 @@ class LedgerGUI:
                 doc.close()
                 pdf_to_period_map[pdf_file] = first_period_found if first_period_found else "Unknown-Student"
                 
+            except CodexHandoffError as e:
+                doc.close()
+                self.log_message(f"[!] Codex OCR stopped the batch. Scans are still in the inbox. {e}")
+                self.finish_processing()
+                return
             except Exception as e:
                 self.log_message(f"[!] Error reading {pdf_file}: {e}")
                 continue

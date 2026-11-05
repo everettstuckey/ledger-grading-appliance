@@ -1,12 +1,13 @@
 """Tenant-scoped Azure OpenAI Responses client for the Ledger daemon."""
 
 import base64
-import json
 import logging
 import math
 import re
 
 import requests
+
+from grading_schema import GRADING_INSTRUCTIONS, grading_fields, grading_json_schema, unwrap_grades
 
 
 AZURE_DEFAULT_MODEL = "gpt-6.1-sol"
@@ -17,7 +18,6 @@ _ENDPOINT = re.compile(
     re.IGNORECASE | re.ASCII,
 )
 _TENANT_ID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.IGNORECASE)
-_FIELD_TYPES = {"string": (str,), "integer": (int,), "number": (int, float), "boolean": (bool,)}
 
 
 class AzureOpenAIError(RuntimeError):
@@ -85,11 +85,14 @@ class AzureOpenAIProvider:
             "max_output_tokens": self.max_output_tokens,
         }
         if grading_schema is not None:
-            fields = _grading_fields(grading_schema)
-            payload["text"] = {"format": _grading_format(fields)}
-            instructions = (
-                f'{instructions}\n\nReturn the grading array inside a JSON object with the single key "results".'
-            ).strip()
+            fields = grading_fields(grading_schema)
+            payload["text"] = {"format": {
+                "type": "json_schema",
+                "name": "ledger_grading_results",
+                "strict": True,
+                "schema": grading_json_schema(fields),
+            }}
+            instructions = f"{instructions}\n\n{GRADING_INSTRUCTIONS}".strip()
         if instructions:
             payload["instructions"] = instructions
 
@@ -121,50 +124,8 @@ class AzureOpenAIProvider:
             raise AzureOpenAIError("invalid_request: Azure OpenAI returned malformed response JSON.") from None
         text = _completed_text(result, model)
         if grading_schema is not None:
-            return _unwrap_grades(text, fields)
+            return unwrap_grades(text, fields, "Azure OpenAI")
         return text
-
-
-def _grading_fields(schema):
-    """Translate the GUI's array of flat Vertex-schema records."""
-    try:
-        item = schema["items"]
-        fields = {name: field["type"].lower() for name, field in item["properties"].items()}
-        if (
-            schema["type"].lower() == "array"
-            and item["type"].lower() == "object"
-            and fields
-            and set(item["required"]) == fields.keys()
-            and all(field_type in _FIELD_TYPES for field_type in fields.values())
-        ):
-            return fields
-    except (AttributeError, KeyError, TypeError):
-        pass
-    raise AzureOpenAIError("invalid_request: Azure OpenAI requires the Ledger grading schema.")
-
-
-def _grading_format(fields):
-    return {
-        "type": "json_schema",
-        "name": "ledger_grading_results",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "results": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {name: {"type": kind} for name, kind in fields.items()},
-                        "required": list(fields),
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            "required": ["results"],
-            "additionalProperties": False,
-        },
-    }
 
 
 def _completed_text(result, model):
@@ -206,23 +167,3 @@ def _completed_text(result, model):
     if not re.fullmatch(rf"{re.escape(model)}(?:-\d{{4}}-\d{{2}}-\d{{2}})?", reported_model):
         raise AzureOpenAIError("invalid_request: Azure OpenAI returned a different model than requested.")
     return text
-
-
-def _unwrap_grades(text, fields):
-    try:
-        document = json.loads(text)
-    except ValueError:
-        raise AzureOpenAIError("invalid_request: Azure OpenAI returned malformed grading JSON.") from None
-    if not isinstance(document, dict) or document.keys() != {"results"}:
-        raise AzureOpenAIError("invalid_request: Azure OpenAI returned an invalid grading document.")
-    grades = document["results"]
-    if not isinstance(grades, list) or not grades:
-        raise AzureOpenAIError("invalid_request: Azure OpenAI returned no grading rows.")
-    for row in grades:
-        if not isinstance(row, dict) or row.keys() != fields.keys():
-            raise AzureOpenAIError("invalid_request: Azure OpenAI returned an invalid grading row.")
-        for name, kind in fields.items():
-            value = row[name]
-            if type(value) not in _FIELD_TYPES[kind] or (type(value) is float and not math.isfinite(value)):
-                raise AzureOpenAIError("invalid_request: Azure OpenAI returned an invalid grading value.")
-    return json.dumps(grades)

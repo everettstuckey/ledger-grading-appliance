@@ -35,6 +35,12 @@ DAEMON_WO2_MD5="552951d9cf33b1c2ddb981d335bd2e95"  # daemon after WO2 (one comme
 GUI_AZURE_MD5="f32639e88ff5972b31b5335fe239a4b7"
 DAEMON_AZURE_MD5="3a2ab58b411c1c232a324bc8fca5c31a"
 AZURE_PROVIDER_MD5="cdf5eba1219540ed74b46ff6e269de9b"
+GUI_CODEX_MD5="781daaad5b8d0f2264dfcef67c98af4f"
+DAEMON_CODEX_MD5="7d6eae5bb126b67ced9e3491c412ca9a"
+AZURE_PROVIDER_CODEX_MD5="8af269e1782c8a05d98d68780f21a207"
+CODEX_PROVIDER_MD5="152aed9cc226985b5c977a24b00abacb"
+GRADING_SCHEMA_MD5="81f37ad558a1baa973242a152a6867c1"
+CODEX_SKILL_MD5="6b2e8f037d8e7994aa73af324a031621"
 
 APT_PKGS=(python3-venv python3-tk python3-dev tesseract-ocr tesseract-ocr-eng zenity wmctrl
           texlive-xetex texlive-latex-extra texlive-science texlive-fonts-recommended
@@ -84,11 +90,24 @@ done
 command -v git >/dev/null || die "git is not installed: sudo apt install git"
 GUI_NOW="$(md5sum < "$SOURCE/engine/ledger-main-minimus.py" | cut -d' ' -f1)"
 DAEMON_NOW="$(md5sum < "$SOURCE/daemon/vertex-api-daemon.py" | cut -d' ' -f1)"
+check_source_md5() {
+    local file="$1" expected="$2"
+    [[ -f "$SOURCE/$file" ]] || die "missing $SOURCE/$file"
+    [[ "$(md5sum < "$SOURCE/$file" | cut -d' ' -f1)" == "$expected" ]] \
+        || die "$file does not match the build"
+}
 AZURE_BUILD=0
-if [[ "$GUI_NOW" == "$GUI_AZURE_MD5" && "$DAEMON_NOW" == "$DAEMON_AZURE_MD5" ]]; then
-    [[ -f "$SOURCE/daemon/azure_provider.py" ]] || die "missing Azure OpenAI provider module"
-    [[ "$(md5sum < "$SOURCE/daemon/azure_provider.py" | cut -d' ' -f1)" == "$AZURE_PROVIDER_MD5" ]] \
-        || die "Azure OpenAI provider module does not match the build"
+CODEX_BUILD=0
+if [[ "$GUI_NOW" == "$GUI_CODEX_MD5" && "$DAEMON_NOW" == "$DAEMON_CODEX_MD5" ]]; then
+    check_source_md5 daemon/azure_provider.py "$AZURE_PROVIDER_CODEX_MD5"
+    check_source_md5 daemon/codex_provider.py "$CODEX_PROVIDER_MD5"
+    check_source_md5 daemon/grading_schema.py "$GRADING_SCHEMA_MD5"
+    check_source_md5 .agents/skills/ledger-grading/SKILL.md "$CODEX_SKILL_MD5"
+    FINAL=1
+    AZURE_BUILD=1
+    CODEX_BUILD=1
+elif [[ "$GUI_NOW" == "$GUI_AZURE_MD5" && "$DAEMON_NOW" == "$DAEMON_AZURE_MD5" ]]; then
+    check_source_md5 daemon/azure_provider.py "$AZURE_PROVIDER_MD5"
     FINAL=1
     AZURE_BUILD=1
 elif [[ "$GUI_NOW" == "$GUI_WO2_MD5" && "$DAEMON_NOW" == "$DAEMON_WO2_MD5" ]]; then
@@ -153,6 +172,12 @@ else
     act "copy daemon" cp -- "$SOURCE/daemon/vertex-api-daemon.py" "$OPT/daemon/"
     if (( AZURE_BUILD )); then
         act "copy Azure OpenAI provider" cp -- "$SOURCE/daemon/azure_provider.py" "$OPT/daemon/"
+    fi
+    if (( CODEX_BUILD )); then
+        act "copy Codex handoff and grading schema" cp -- "$SOURCE/daemon/codex_provider.py" \
+            "$SOURCE/daemon/grading_schema.py" "$OPT/daemon/"
+        act "copy Ledger grading skill" cp -- "$SOURCE/.agents/skills/ledger-grading/SKILL.md" \
+            "$OPT/daemon/ledger-grading.SKILL.md"
     fi
     act "own copied files" chown -R "$OWNER:ledger-teacher" "$OPT/engine" "$OPT/daemon"
 

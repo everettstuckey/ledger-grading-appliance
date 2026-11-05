@@ -13,6 +13,7 @@ registry.tsv
 *.sqlite
 *.sqlite3
 .ledger-prompt.txt
+.Codex Jobs/
 
 # Scans, output, logs
 *.pdf

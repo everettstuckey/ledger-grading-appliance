@@ -22,12 +22,13 @@ In **System Initialization**, enter the Azure OpenAI resource URL (for example, 
 
 ### Existing Ledger installations
 
-The installer preserves installed engine and daemon files on rerun. Close Ledger, run `sudo bash build-ledger.sh --commit` from this checkout to install the dependencies, then update the three files below. Back up local source changes before copying.
+The installer preserves installed engine and daemon files on rerun. Close Ledger, run `sudo bash build-ledger.sh --commit` from this checkout to install the dependencies, then update the files below. Back up local source changes before copying.
 
 ```bash
 sudo systemctl stop ledger-daemon.service
 sudo install -o paragon -g ledger-teacher -m 0640 engine/ledger-main-minimus.py /opt/ledger/engine/
-sudo install -o paragon -g ledger-teacher -m 0640 daemon/vertex-api-daemon.py daemon/azure_provider.py /opt/ledger/daemon/
+sudo install -o paragon -g ledger-teacher -m 0640 daemon/{vertex-api-daemon,azure_provider,codex_provider,grading_schema}.py /opt/ledger/daemon/
+sudo install -o paragon -g ledger-teacher -m 0640 .agents/skills/ledger-grading/SKILL.md /opt/ledger/daemon/ledger-grading.SKILL.md
 sudoedit /etc/paragon/.env
 ```
 

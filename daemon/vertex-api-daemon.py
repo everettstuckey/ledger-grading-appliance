@@ -2,7 +2,7 @@
 """
 vertex-api-daemon.py  --  The Ledger's local AI broker  (v2.9, multi-provider
 + direct Anthropic API route + multi-image Silo 2 + Google-optional startup
-+ vendor-default sampling + Gemini Developer-API route + Azure OpenAI).
++ vendor-default sampling + Gemini Developer-API route + Azure OpenAI + Codex desktop).
 
 [PATCH:google-devapi] v2.9 (WO-A7): the Google route can be provisioned with a
 Google AI Studio API key (LEDGER_GOOGLE_API_KEY, "AIza...") INSTEAD of a GCP
@@ -35,6 +35,8 @@ call. Routing is by the model id the GUI sends:
   * Azure OpenAI models (gpt-6.1-sol, gpt-6-astra)
         -> Azure OpenAI Responses API using the school tenant's Azure CLI
            sign-in under the daemon service account.
+  * Codex models (codex/gpt-6.1-sol, codex/gpt-6-astra)
+        -> a private job folder for the signed-in Codex desktop app.
 
 [PATCH:multi-image] /api/silo2 additionally accepts an OPTIONAL "images_b64"
 array (essay / FULL_PAGE mode: one entry per student response page, in page
@@ -89,6 +91,9 @@ paragon-run daemon can read it):
   LEDGER_AZURE_TENANT_ID="..."                              (school Entra tenant GUID)
   LEDGER_AZURE_OPENAI_TIMEOUT_S="300"                       (optional upstream read timeout)
   LEDGER_AZURE_OPENAI_MAX_OUTPUT_TOKENS="16384"             (optional Azure output ceiling)
+  LEDGER_CODEX_ENABLED="true"                             (enable Codex desktop jobs)
+  LEDGER_CODEX_JOB_DIR="..."                               (optional absolute jobs folder)
+  LEDGER_CODEX_TIMEOUT_S="300"                            (optional Codex job timeout)
 
 The Vertex routes share the same Google Application Default Credentials.
 The Anthropic and Azure Identity SDKs are loaded when their routes need them.
@@ -107,6 +112,7 @@ from google.genai import types
 from google.genai.errors import APIError
 
 from azure_provider import AZURE_DEFAULT_MODEL, AZURE_MODELS, AzureOpenAIError, AzureOpenAIProvider
+from codex_provider import CODEX_DEFAULT_MODEL, CODEX_MODELS, CodexProvider, CodexProviderError
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -184,25 +190,46 @@ if _azure_endpoint or _azure_tenant:
             ENV.get("LEDGER_AZURE_OPENAI_MAX_OUTPUT_TOKENS") or "16384",
         )
     except AzureOpenAIError as exc:
-        if not (_HAS_GOOGLE or _HAS_ANTHROPIC_KEY):
-            raise
         _azure_config_error = str(exc)
         log.warning("Azure OpenAI is unavailable. %s", _azure_config_error)
 
-if not (_HAS_GOOGLE or _HAS_ANTHROPIC_KEY or _azure_client):
+_codex_client = None
+_codex_config_error = None
+if (ENV.get("LEDGER_CODEX_ENABLED") or "").strip().lower() == "true":
+    try:
+        _codex_client = CodexProvider(
+            (ENV.get("LEDGER_CODEX_JOB_DIR") or "").strip(),
+            ENV.get("LEDGER_CODEX_TIMEOUT_S") or "300",
+        )
+    except CodexProviderError as exc:
+        _codex_config_error = str(exc)
+        log.warning("Codex desktop is unavailable. %s", _codex_config_error)
+
+if not (_HAS_GOOGLE or _HAS_ANTHROPIC_KEY or _azure_client or _codex_client):
+    if _azure_config_error or _codex_config_error:
+        raise RuntimeError(_azure_config_error or _codex_config_error)
     raise RuntimeError(
         "No AI provider is configured in /etc/paragon/.env. Set "
         "LEDGER_GOOGLE_API_KEY (Google AI Studio key), GCP_PROJECT_ID "
         "(Google Vertex route), LEDGER_ANTHROPIC_API_KEY (direct Anthropic route), "
-        "or LEDGER_AZURE_OPENAI_ENDPOINT and LEDGER_AZURE_TENANT_ID (Azure OpenAI), "
+        "LEDGER_AZURE_OPENAI_ENDPOINT and LEDGER_AZURE_TENANT_ID (Azure OpenAI), "
+        "or LEDGER_CODEX_ENABLED=true (Codex desktop), "
         "then restart ledger-daemon.service."
     )
 
-_azure_only = _azure_client is not None and not (_HAS_GOOGLE or _HAS_ANTHROPIC_KEY)
+_azure_only = _azure_client is not None and not (_HAS_GOOGLE or _HAS_ANTHROPIC_KEY or _codex_client)
+_codex_only = _codex_client is not None and not (_HAS_GOOGLE or _HAS_ANTHROPIC_KEY or _azure_client)
 if not _HAS_GOOGLE and not ENV.get("LEDGER_DEFAULT_MODEL"):
-    DEFAULT_MODEL = AZURE_DEFAULT_MODEL if _azure_only else "claude-sonnet-5-5"
+    if _azure_client and not _HAS_ANTHROPIC_KEY:
+        DEFAULT_MODEL = AZURE_DEFAULT_MODEL
+    elif _codex_only:
+        DEFAULT_MODEL = CODEX_DEFAULT_MODEL
+    else:
+        DEFAULT_MODEL = "claude-sonnet-5-5"
 if _azure_only and DEFAULT_MODEL.lower() not in AZURE_MODELS:
     raise RuntimeError("LEDGER_DEFAULT_MODEL must be gpt-6.1-sol or gpt-6-astra on an Azure OpenAI-only install.")
+if _codex_only and DEFAULT_MODEL.lower() not in CODEX_MODELS:
+    raise RuntimeError("LEDGER_DEFAULT_MODEL must be codex/gpt-6.1-sol or codex/gpt-6-astra on a Codex-only install.")
 
 # [PATCH:google-devapi] Which Google route this box is using, surfaced on the
 # health endpoint: "developer-api" (AI Studio key) | "vertex" | "absent".
@@ -256,6 +283,16 @@ def _require_azure():
             "and LEDGER_AZURE_TENANT_ID in /etc/paragon/.env."
         )
     return _azure_client
+
+
+def _require_codex(model_name):
+    if model_name.lower() not in CODEX_MODELS:
+        raise CodexProviderError("invalid_request: Select codex/gpt-6.1-sol or codex/gpt-6-astra.")
+    if _codex_client is None:
+        raise CodexProviderError(
+            _codex_config_error or "invalid_request: Set LEDGER_CODEX_ENABLED=true to enable Codex desktop."
+        )
+    return _codex_client
 
 
 # The Anthropic client is created lazily on first use (see _anthropic_client),
@@ -329,8 +366,10 @@ def _get_anthropic_client():
 
 
 def _provider_for(model_name):
-    """Route model IDs to Azure OpenAI, Anthropic, or google-genai."""
+    """Route model IDs to Codex desktop, Azure OpenAI, Anthropic, or google-genai."""
     m = (model_name or "").lower()
+    if m.startswith("codex/"):
+        return "codex"
     if m in AZURE_MODELS:
         return "azure-openai"
     if m.startswith("claude") or "anthropic/" in m or m.startswith("publishers/anthropic"):
@@ -343,7 +382,7 @@ def _provider_for(model_name):
 #   Google    : name = the Vertex cache resource name
 #   Anthropic : name = the sentinel "anthropic-local"; the actual reusable
 #               material is held in _anthropic_ctx and re-sent each grade.
-#   Azure OpenAI : local master images and instructions, sent with each grade.
+#   Azure OpenAI and Codex desktop share local masters and instructions.
 # ---------------------------------------------------------------------------
 _cache_lock = threading.Lock()
 _active_cache = {"name": None, "model": None}
@@ -355,8 +394,8 @@ _ANTHROPIC_SENTINEL = "anthropic-local"
 # masters (e.g. short/single-page demos) still grade. Large masters still cache.
 _google_ctx = {"system": "", "image_bytes": []}      # raw PNG bytes for master pages
 _GOOGLE_INLINE = "google-inline"
-_azure_ctx = {"system": "", "image_bytes": []}
-_AZURE_INLINE = "azure-openai-inline"
+_inline_ctx = {"system": "", "image_bytes": []}
+_INLINE_NAMES = {"azure-openai": "azure-openai-inline", "codex": "codex-inline"}
 
 
 def _purge_active_cache():
@@ -370,9 +409,9 @@ def _purge_active_cache():
         _anthropic_ctx["image_bytes"] = []
         _google_ctx["system"] = ""
         _google_ctx["image_bytes"] = []
-        _azure_ctx["system"] = ""
-        _azure_ctx["image_bytes"] = []
-    if name and name not in (_ANTHROPIC_SENTINEL, _GOOGLE_INLINE, _AZURE_INLINE):
+        _inline_ctx["system"] = ""
+        _inline_ctx["image_bytes"] = []
+    if name and name not in (_ANTHROPIC_SENTINEL, _GOOGLE_INLINE, *_INLINE_NAMES.values()):
         # [PATCH:google-optional] a named Google cache cannot exist on a box
         # with no Vertex client, but guard anyway rather than crash a purge.
         if client is None:
@@ -387,8 +426,8 @@ def _purge_active_cache():
         log.info("Cleared Anthropic local grading context (model=%s).", model)
     elif name == _GOOGLE_INLINE:
         log.info("Cleared Google inline grading context (model=%s).", model)
-    elif name == _AZURE_INLINE:
-        log.info("Cleared Azure OpenAI grading context (model=%s).", model)
+    elif name in _INLINE_NAMES.values():
+        log.info("Cleared inline grading context (model=%s).", model)
 
 
 def _is_cache_too_small(exc):
@@ -598,6 +637,9 @@ def health():
         "google_route": _google_route,   # [PATCH:google-devapi] "developer-api" | "vertex" | "absent"
         "azure_openai_route": "entra-cli" if _azure_client is not None else "absent",
         **({"azure_openai_default_model": DEFAULT_MODEL} if _azure_only else {}),
+        "codex_route": "desktop" if _codex_client is not None else "absent",
+        **({"codex_job_dir": str(_codex_client.job_dir)} if _codex_client is not None else {}),
+        **({"codex_default_model": DEFAULT_MODEL} if _codex_only else {}),
         "anthropic_sdk_installed": anthropic_available,
         "cache_active": cache_active,
         "cache_model": cache_model,
@@ -619,6 +661,10 @@ def silo1():
 
         if provider == "azure-openai":
             text = _require_azure().respond(model_name, prompt, [png])
+            return jsonify({"status": "success", "text": text})
+
+        if provider == "codex":
+            text = _require_codex(model_name).respond(model_name, prompt, [png])
             return jsonify({"status": "success", "text": text})
 
         if provider == "anthropic":
@@ -663,17 +709,21 @@ def cache_build():
         _purge_active_cache()
 
         provider = _provider_for(model_name)
-        if provider == "azure-openai":
-            _require_azure()
+        if provider in _INLINE_NAMES:
+            if provider == "codex":
+                _require_codex(model_name)
+            else:
+                _require_azure()
+            cache_name = _INLINE_NAMES[provider]
             img_bytes = [_decode_png(b) for b in images_b64]
             with _cache_lock:
-                _azure_ctx["system"] = system_instruction
-                _azure_ctx["image_bytes"] = img_bytes
-                _active_cache["name"] = _AZURE_INLINE
+                _inline_ctx["system"] = system_instruction
+                _inline_ctx["image_bytes"] = img_bytes
+                _active_cache["name"] = cache_name
                 _active_cache["model"] = model_name
-            log.info("Azure OpenAI grading context staged (model=%s, %d master image(s)).",
+            log.info("Inline grading context staged (model=%s, %d master image(s)).",
                      model_name, len(img_bytes))
-            return jsonify({"status": "success", "text": _AZURE_INLINE})
+            return jsonify({"status": "success", "text": cache_name})
 
         if provider == "anthropic":
             # No server-side named cache for Anthropic: hold the material locally
@@ -797,19 +847,25 @@ def silo2():
             anthropic_imgs = list(_anthropic_ctx["image_bytes"])
             google_system = _google_ctx["system"]
             google_imgs = list(_google_ctx["image_bytes"])
-            azure_system = _azure_ctx["system"]
-            azure_imgs = list(_azure_ctx["image_bytes"])
+            inline_system = _inline_ctx["system"]
+            inline_imgs = list(_inline_ctx["image_bytes"])
         if not cache_name:
             raise RuntimeError("No active evaluation context. Call /api/cache/build first.")
 
         provider = _provider_for(cache_model)
-        if provider == "azure-openai":
+        if provider in _INLINE_NAMES:
             if schema is None:
-                raise AzureOpenAIError("invalid_request: Azure OpenAI requires the Ledger grading schema.")
-            masters = master_pngs if master_pngs is not None else azure_imgs
-            text = _require_azure().respond(
+                raise ValueError("invalid_request: This provider requires the Ledger grading schema.")
+            masters = master_pngs if master_pngs is not None else inline_imgs
+            if provider == "codex":
+                provider_client = _require_codex(cache_model)
+                options = {"master_image_count": len(masters)}
+            else:
+                provider_client = _require_azure()
+                options = {}
+            text = provider_client.respond(
                 cache_model, prompt, [*masters, *live_pngs],
-                instructions=azure_system, grading_schema=schema,
+                instructions=inline_system, grading_schema=schema, **options,
             )
             return jsonify({"status": "success", "text": text})
 
@@ -968,4 +1024,5 @@ if __name__ == "__main__":
     log.info("Google route for this box: %s", _google_route)
     log.info("Claude route for this box: %s", _anthropic_route)
     log.info("Azure OpenAI route for this box: %s", "entra-cli" if _azure_client is not None else "absent")
+    log.info("Codex desktop route for this box: %s", "desktop" if _codex_client is not None else "absent")
     serve(app, host=HOST, port=PORT, threads=4)
