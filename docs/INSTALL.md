@@ -50,17 +50,18 @@ This procedure is written for a technically qualified operator setting up a dedi
 
 ## Part C — First-time setup
 
-7. Get a test key.
+7. Set up an AI provider for evaluation.
    - **Google AI Studio:** choose **Get API key**. The setup screen will require you to confirm that billing is enabled on the key's project. Google's terms differ for unpaid and paid use; read them and have your institution review them. Keys start with `AQ.` or `AIza`.
    - **Anthropic:** create a key in the Anthropic Console. It starts with `sk-ant-`. Read Anthropic's terms as well.
+   - **Azure OpenAI** uses a model deployment and a Microsoft Entra sign-in. Follow the [Azure setup instructions](AZURE_OPENAI.md) before opening Ledger.
 8. Double-click **Start Ledger** on the desktop. The first time, Xfce asks whether to trust the launcher: click **Mark Executable**. It asks once.
 9. On the **SYSTEM INITIALIZATION** screen:
-   1. Paste the key into its field (Google AI Studio or Anthropic, or both).
+   1. Enter the provider settings. For Azure OpenAI, enter the resource URL and tenant ID.
    2. If you entered a Google key, the **Billing and Student Work — Required Reading** screen opens. Read it, tick the confirmation, click **CONTINUE**.
    3. Read the **evaluation terms**. Type the operator's name and tick the agreement box. If you do not agree to every term, stop here.
    4. Click **AUTHORIZE APPLIANCE** and type your password.
 10. The diagnostic log (the big dark box) ends with a line like `AUTHORIZATION EXECUTED … Providers: GOOGLE (AI Studio)` or `… Providers: ANTHROPIC`. The status in the sidebar reads **SYSTEM: IDLE**.
-11. Click **AI MODEL** and type the exact model to use, for example `gemini-4-argon` (Google) or `claude-fable-5` (Anthropic). Click **SAVE MY MODEL**.
+11. Click **AI MODEL** and type the exact model to use, for example `gemini-4-argon`, `claude-fable-5`, or `gpt-6.1-sol`. Click **SAVE MY MODEL**.
 
 ## Part D — Before the first test run
 

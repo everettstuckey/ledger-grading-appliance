@@ -23,7 +23,7 @@ It was built and tested in October 2026 on Debian 13.7 running on a Lenovo Think
 3. The software reads each page's title and ID, prepares images (see the table below), and sends them to the AI provider together with a blank copy of the document and the scoring instructions entered by the operator.
 4. The software writes a *conspectus* PDF per ID — the scanned pages, item-by-item feedback, and a score — plus a `Tabula.csv` of scores. A gradebook view can export a CSV.
 
-Two providers are supported: **Google** (Gemini models, via a Google AI Studio key or a Google Cloud project) and **Anthropic** (Claude models). At least one is required.
+Ledger supports **Google** (Gemini through AI Studio or Vertex), **Anthropic** (Claude), and **Azure OpenAI** (GPT-6.1 Sol or GPT-6 Astra through Microsoft Entra ID). [Set up Azure OpenAI](docs/AZURE_OPENAI.md).
 
 ## What leaves the machine
 
@@ -43,7 +43,7 @@ The ID box is intended to hold a pseudonym assigned by the operator. The roster 
 
 ## Your AI provider
 
-What a provider does with the images after they leave the machine is governed by **that provider's terms**, not by this software. Those terms differ by account type and change over time. This repository does not describe them and makes no claim about them. Read them, and have your institution review them, before entering a key.
+What a provider does with images after they leave the machine depends on its terms. Those terms differ by account type and change over time. Have your institution review the terms before configuring a provider.
 
 When a Google AI Studio key is entered, the setup screen requires the operator to confirm that billing is enabled on the key's project and links to Google's terms. All provider charges appear on the account whose key is entered.
 
@@ -55,7 +55,7 @@ When a Google AI Studio key is entered, the setup screen requires the operator t
 | Debian 13 with the Xfce desktop | The build script checks for Debian 13 and refuses anything else. |
 | A monitor, keyboard and mouse | |
 | A scanner that produces PDF | |
-| A test key for one AI provider | Use an account your institution controls. |
+| Access to an AI provider | Use an account your institution controls. Azure OpenAI uses an Entra sign-in and model deployment. |
 
 The build procedure is **[docs/INSTALL.md](docs/INSTALL.md)**. It assumes a technically qualified operator and a machine that holds nothing else of value.
 

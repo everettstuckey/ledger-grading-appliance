@@ -24,7 +24,7 @@ Anyone who builds or runs this software does so entirely on their own initiative
 
 ## 4. Third-party services
 
-This software sends images to third-party AI services (Google and/or Anthropic) that you choose and pay for. What those services do with the images is governed by their terms, not by this software or its author. Nothing in this repository is a statement of what any provider's terms say, and those terms can change at any time. Read them yourself.
+This software sends images to the AI services you configure and pay for (Google, Anthropic, or Azure OpenAI). What those services do with the images is governed by their terms, not by this software or its author. Nothing in this repository is a statement of what any provider's terms say, and those terms can change at any time. Read them yourself.
 
 ## 5. No warranty; limitation of liability
 

@@ -256,6 +256,12 @@ NO_INSTRUCTIONS_LOG = "NO GRADING INSTRUCTIONS — enter them before running"  #
 # never be refused -- it only draws the warning.
 AI_STUDIO_PREFIXES = ("AQ.", "AIza")
 ANTHROPIC_PREFIX = "sk-ant-"
+DEFAULT_GUI_MODEL = "gemini-3.5-pro-preview"
+AZURE_ENDPOINT = re.compile(
+    r"https://[a-z0-9][a-z0-9-]*\.(?:openai\.azure\.com|services\.ai\.azure\.com)/?",
+    re.IGNORECASE | re.ASCII,
+)
+AZURE_TENANT = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.IGNORECASE)
 WIZARD_INSTITUTION_VALUE = "owner-operator"   # fixed; no school name is collected
 # Measured on the live display (1360x768, work area 735) during WO-A7 -- see
 # the WO-A7 report for the raw winfo_req* numbers. Largest state + margin.
@@ -269,7 +275,8 @@ WIZARD_SCREEN_ALLOWANCE = 100       # same screen clamp the dashboard uses
 WIZARD_LEVEL_COLORS = {"block": "#c0392b", "warn": "#e67e22", "ready": "#1e8449", "idle": "#7f8c8d"}
 WIZARD_DEFAULT_RULE = (
     "Provide GOOGLE (AI Studio API key, or Project ID + service-account JSON under "
-    "Advanced), ANTHROPIC (API key), or BOTH. At least one complete provider is required."
+    "Advanced), ANTHROPIC (API key), or Azure OpenAI (resource URL and Entra tenant ID). "
+    "At least one complete provider is required."
 )
 WIZARD_BILLING_REQUIRED = "Billing confirmation required for Google AI Studio keys."
 
@@ -292,7 +299,7 @@ WIZARD_LEGAL_TEXT = (
     "law, and any data-privacy agreement my institution requires.\n\n"
 
     "    2. DATA SENT TO THIRD PARTIES: This software sends images to the AI "
-    "provider(s) I configure (Google and/or Anthropic): the blank master pages, "
+    "providers I configure (Google, Anthropic, or Azure OpenAI): the blank master pages, "
     "a title crop, an ID crop from every page, and either cropped answer boxes "
     "(WORKSHEET mode) or WHOLE PAGES (ESSAY mode). What a provider does with "
     "those images is governed by its terms, which I have read and accept.\n\n"
@@ -347,22 +354,26 @@ BILLING_DISCLOSURE_TEXT = (
 )
 
 
-def wizard_provider_state(ai_key, gcp_id, has_creds, anth_key, billing_confirmed):
+def wizard_provider_state(ai_key, gcp_id, has_creds, anth_key, billing_confirmed,
+                          azure_endpoint="", azure_tenant=""):
     """Pure provider-completeness rule for the SYSTEM INITIALIZATION wizard.
 
     Google is complete as EITHER an AI Studio key OR (Project ID + service-account
-    JSON); Anthropic as an sk-ant- key; at least one complete provider is required.
+    JSON), Anthropic as an sk-ant- key, and Azure as an endpoint plus tenant ID.
+    At least one complete provider is required.
     Both Google forms at once -> block (one Google route per box). A half-entered
     Vertex pair -> block. A malformed Anthropic key -> block. An AI Studio key
     without the billing attestation -> block. Prefix sanity (AQ./AIza / sk-ant- in the
     wrong field) -> warn only.
 
     Returns a dict: ok (bool), level ('block'|'warn'|'ready'|'idle'), message
-    (status-line text), warnings (list), use_ai_studio, use_vertex, use_anthropic.
+    (status-line text), warnings (list), and the selected provider flags.
     """
     ai_key = (ai_key or "").strip()
     gcp_id = (gcp_id or "").strip()
     anth_key = (anth_key or "").strip()
+    azure_endpoint = (azure_endpoint or "").strip()
+    azure_tenant = (azure_tenant or "").strip()
     has_creds = bool(has_creds)
 
     ai_present = bool(ai_key)
@@ -371,6 +382,7 @@ def wizard_provider_state(ai_key, gcp_id, has_creds, anth_key, billing_confirmed
     both_google = ai_present and (bool(gcp_id) or has_creds)
     anth_complete = anth_key.startswith(ANTHROPIC_PREFIX)
     anth_malformed = bool(anth_key) and not anth_complete
+    azure_complete = bool(AZURE_ENDPOINT.fullmatch(azure_endpoint) and AZURE_TENANT.fullmatch(azure_tenant))
 
     warnings = []
     if ai_present and ai_key.startswith(ANTHROPIC_PREFIX):
@@ -381,7 +393,8 @@ def wizard_provider_state(ai_key, gcp_id, has_creds, anth_key, billing_confirmed
 
     def _out(ok, level, message, use_ai=False, use_vertex=False, use_anth=False):
         return {"ok": ok, "level": level, "message": message, "warnings": warnings,
-                "use_ai_studio": use_ai, "use_vertex": use_vertex, "use_anthropic": use_anth}
+                "use_ai_studio": use_ai, "use_vertex": use_vertex, "use_anthropic": use_anth,
+                "use_azure": ok and azure_complete}
 
     if both_google:
         return _out(False, "block",
@@ -402,9 +415,11 @@ def wizard_provider_state(ai_key, gcp_id, has_creds, anth_key, billing_confirmed
                     "(copy the whole key from the Anthropic Console).")
     if ai_present and not billing_confirmed:
         return _out(False, "block", WIZARD_BILLING_REQUIRED)
+    if (azure_endpoint or azure_tenant) and not azure_complete:
+        return _out(False, "block", "Enter both the Azure OpenAI HTTPS resource URL and the Entra tenant GUID.")
 
     google_complete = ai_present or vertex_complete
-    if not (google_complete or anth_complete):
+    if not (google_complete or anth_complete or azure_complete):
         return _out(False, "idle", WIZARD_DEFAULT_RULE)
 
     names = []
@@ -414,6 +429,8 @@ def wizard_provider_state(ai_key, gcp_id, has_creds, anth_key, billing_confirmed
         names.append("GOOGLE (Vertex)")
     if anth_complete:
         names.append("ANTHROPIC (direct API)")
+    if azure_complete:
+        names.append("Azure OpenAI (Microsoft Entra)")
     ready = ("Providers ready: " if len(names) > 1 else "Provider ready: ") + " + ".join(names) + "."
     if warnings:
         return _out(True, "warn", ready + " WARNING: " + warnings[0],
@@ -816,12 +833,6 @@ class LedgerGUI:
             #    run at vendor defaults. A legacy 'silo2_temperature' row in an
             #    existing DB is simply never read.
 
-            # 5. Inject default AI model
-            cursor.execute('''
-                INSERT OR IGNORE INTO Settings (Setting_Key, Setting_Value)
-                VALUES ('silo2_model', 'gemini-3.5-pro-preview')
-            ''')
-            
             # 6. Inject default Scanner Calibration Coordinates (X, Y, W, H)
             cursor.execute('''
                 INSERT OR IGNORE INTO Settings (Setting_Key, Setting_Value)
@@ -981,6 +992,20 @@ class LedgerGUI:
         ai_entry, ai_var = _masked_row(body, "GOOGLE AI STUDIO API KEY:")
         # --- ANTHROPIC KEY ([PATCH:wizard-anthropic]) ---
         anth_entry, anth_var = _masked_row(body, "ANTHROPIC API KEY:")
+
+        azure_frame = ctk.CTkFrame(body, fg_color="transparent")
+        azure_frame.pack(pady=5)
+        azure_endpoint_var = ctk.StringVar(value="")
+        azure_tenant_var = ctk.StringVar(value="")
+        for row, label, variable in (
+            (0, "Azure OpenAI resource URL", azure_endpoint_var),
+            (1, "Microsoft Entra tenant ID", azure_tenant_var),
+        ):
+            ctk.CTkLabel(azure_frame, text=label, font=self.main_font).grid(row=row, column=0, sticky="w", padx=10)
+            ctk.CTkEntry(azure_frame, font=self.main_font, width=350, textvariable=variable).grid(
+                row=row, column=1, pady=4)
+        ctk.CTkLabel(azure_frame, text="For Azure, sign in with Azure CLI as the paragon user.",
+                     font=note_font).grid(row=2, column=0, columnspan=2, pady=(0, 4))
 
         # One-line provider rule so the operator knows what unlocks the button.
         provider_rule = ctk.CTkLabel(body, text=WIZARD_DEFAULT_RULE, font=note_font,
@@ -1249,7 +1274,8 @@ class LedgerGUI:
                 billing_var.set("off")
                 disc["confirmed_key"] = None
             st = wizard_provider_state(ai_key, gcp_var.get(), creds_state['path'] is not None,
-                                       anth_var.get(), billing_var.get() == "on")
+                                        anth_var.get(), billing_var.get() == "on",
+                                        azure_endpoint_var.get(), azure_tenant_var.get())
             disclosure_btn.configure(state="normal" if ai_key else "disabled")
             provider_rule.configure(text=st["message"], text_color=WIZARD_LEVEL_COLORS[st["level"]])
             has_rep = len(rep_var.get().strip()) > 0
@@ -1261,7 +1287,7 @@ class LedgerGUI:
 
         ai_var.trace_add("write", _on_ai_change)
         ai_entry.bind("<FocusOut>", _on_ai_focus_out)
-        for _v in (anth_var, gcp_var, rep_var):
+        for _v in (anth_var, gcp_var, rep_var, azure_endpoint_var, azure_tenant_var):
             _v.trace_add("write", validate_inputs)
         liability_cb.configure(command=validate_inputs)
 
@@ -1273,14 +1299,17 @@ class LedgerGUI:
             ai_key = ai_var.get().strip()
             new_key = gcp_var.get().strip()
             anth_key = anth_var.get().strip()
+            azure_endpoint = azure_endpoint_var.get().strip().rstrip("/")
+            azure_tenant = azure_tenant_var.get().strip()
             rep_name = rep_var.get().strip()
             timestamp = datetime.datetime.now().isoformat()
 
             st = wizard_provider_state(ai_key, new_key, creds_state['path'] is not None,
-                                       anth_key, billing_var.get() == "on")
+                                        anth_key, billing_var.get() == "on", azure_endpoint, azure_tenant)
             use_ai = st["use_ai_studio"]
             use_vertex = st["use_vertex"]
             use_anthropic = st["use_anthropic"]
+            use_azure = st["use_azure"]
 
             if st["ok"] and rep_name:
                 # 1. Stage .env, the service-account key (Vertex route only),
@@ -1304,6 +1333,9 @@ class LedgerGUI:
                         # Daemon v2.4 reads this and routes claude-* models to
                         # the DIRECT Anthropic API.
                         f.write(f'LEDGER_ANTHROPIC_API_KEY="{anth_key}"\n')
+                    if use_azure:
+                        f.write(f'LEDGER_AZURE_OPENAI_ENDPOINT="{azure_endpoint}"\n')
+                        f.write(f'LEDGER_AZURE_TENANT_ID="{azure_tenant}"\n')
                 if use_vertex:
                     try:
                         shutil.copy(creds_state['path'], temp_sa)
@@ -1376,7 +1408,7 @@ class LedgerGUI:
                 # 4. Finalizing Log
                 providers = " + ".join(
                     p for p, on in (("GOOGLE (AI Studio)", use_ai), ("GOOGLE (Vertex)", use_vertex),
-                                    ("ANTHROPIC", use_anthropic)) if on
+                                    ("ANTHROPIC", use_anthropic), ("Azure OpenAI", use_azure)) if on
                 )
                 if use_ai:
                     self.log_message("Google (AI Studio): billing confirmed by operator")
@@ -1555,10 +1587,16 @@ class LedgerGUI:
             cursor.execute("SELECT Setting_Value FROM Settings WHERE Setting_Key = 'silo2_model'")
             result = cursor.fetchone()
             conn.close()
-            return result[0] if result else "gemini-3.5-pro-preview"
+            if result and result[0] and result[0] != DEFAULT_GUI_MODEL:
+                return result[0]
         except Exception as e:
             self.log_message(f"[!] Database Read Error (Model): {e}")
-            return "gemini-3.5-pro-preview"
+        try:
+            health = requests.get("http://127.0.0.1:5000/", timeout=1)
+            health.raise_for_status()
+            return health.json().get("azure_openai_default_model") or DEFAULT_GUI_MODEL
+        except (requests.RequestException, ValueError):
+            return DEFAULT_GUI_MODEL
 
     def get_crop_coordinates(self, key):
         """Fetches a specific bounding box from the database as a tuple of ints (x, y, w, h)."""
@@ -1578,7 +1616,7 @@ class LedgerGUI:
 
     def set_user_model(self, model_name):
         """Persist this user's chosen model to their own siloed DB (UPSERT)."""
-        model_name = (model_name or "").strip() or "gemini-3.5-pro-preview"
+        model_name = (model_name or "").strip() or DEFAULT_GUI_MODEL
         try:
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
@@ -1596,10 +1634,7 @@ class LedgerGUI:
             return False
 
     def open_model_picker(self):
-        """All-users window to choose the Vertex model by EXACT id. No
-        dropdown -- type the precise Model Garden id, e.g.
-        gemini-3.5-flash, gemini-3.1-pro-preview, claude-opus-4-8,
-        meta/llama-3.1-405b-instruct-maas. Persists per-user."""
+        """Choose an exact model ID and save it for this user."""
         win = ctk.CTkToplevel(self.root)
         win.title("AI MODEL")
         win.geometry("640x460")
@@ -1610,8 +1645,9 @@ class LedgerGUI:
         ctk.CTkLabel(win, text="CHOOSE YOUR AI MODEL", font=self.header_font).pack(pady=(24, 6))
         ctk.CTkLabel(
             win,
-            text=("Type the EXACT model id.\n"
-                  "Examples: gemini-4-argon, gemini-3.5-flash, claude-opus-4-8"),
+            text=("Enter the exact model ID.\n"
+                  "Azure: gpt-6.1-sol or gpt-6-astra\n"
+                  "Google: gemini-4-argon  |  Anthropic: claude-opus-4-8"),
             font=self.main_font, justify="center"
         ).pack(pady=(0, 14), padx=20)
 
@@ -1662,8 +1698,8 @@ class LedgerGUI:
 
         warn_label = ctk.CTkLabel(
             warn_frame,
-            text=("WARNING!\n\nFactory reset wipes this appliance's credentials\n"
-                  "and re-locks it. Everyone will know it was you.\n"
+            text=("WARNING!\n\nFactory reset removes Ledger's provider settings and keys\n"
+                  "and re-locks the appliance. Azure CLI sign-in is separate.\n"
                   "Get out of here unless you know what you're doing!"),
             font=ctk.CTkFont(family="Ubuntu", size=16, weight="bold"),
             text_color="white"

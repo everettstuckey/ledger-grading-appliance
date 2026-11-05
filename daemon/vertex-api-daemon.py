@@ -2,7 +2,7 @@
 """
 vertex-api-daemon.py  --  The Ledger's local AI broker  (v2.9, multi-provider
 + direct Anthropic API route + multi-image Silo 2 + Google-optional startup
-+ vendor-default sampling + Gemini Developer-API route).
++ vendor-default sampling + Gemini Developer-API route + Azure OpenAI).
 
 [PATCH:google-devapi] v2.9 (WO-A7): the Google route can be provisioned with a
 Google AI Studio API key (LEDGER_GOOGLE_API_KEY, "AIza...") INSTEAD of a GCP
@@ -17,12 +17,8 @@ parameters (temperature, top_p, top_k, thinking budgets) to any provider, on
 any path -- every model runs at its vendor defaults. A "temperature" field in
 an incoming /api/silo2 body (the GUI still sends one) is accepted and ignored.
 
-[PATCH:google-optional] v2.4: the Google/Vertex stack is no longer mandatory.
-A district may initialize with (a) Google credentials, (b) an Anthropic API
-key, or (c) both. The daemon refuses to start only when NEITHER provider is
-configured. When GCP_PROJECT_ID is absent, the Vertex client is never
-constructed, and any request routed to a Google model returns a clear
-GUI-surfaced error instead of crashing the service.
+At least one AI provider must be configured. A request for a model whose
+provider is unavailable returns an error to the GUI.
 
 The grading GUI (ledger-main-minimus.py) never talks to a provider directly. It
 POSTs to this loopback service at http://127.0.0.1:5000, which brokers every
@@ -36,6 +32,9 @@ call. Routing is by the model id the GUI sends:
            otherwise the anthropic[vertex] SDK (AnthropicVertex), exactly as
            v2.x. Same messages.create call either way; the GUI cannot tell
            the difference.
+  * Azure OpenAI models (gpt-6.1-sol, gpt-6-astra)
+        -> Azure OpenAI Responses API using the school tenant's Azure CLI
+           sign-in under the daemon service account.
 
 [PATCH:multi-image] /api/silo2 additionally accepts an OPTIONAL "images_b64"
 array (essay / FULL_PAGE mode: one entry per student response page, in page
@@ -53,6 +52,9 @@ code changes. Caching is abstracted per provider behind that contract:
                 system prompt + master images locally and re-sends them as
                 cache_control:"ephemeral" blocks on every grade (Anthropic prompt
                 caching, 5-min lifetime refreshed on each hit).
+  * Azure OpenAI : the daemon holds the instructions and master images in
+                   memory and sends them with each grade. It disables Responses
+                   API response storage and unwraps structured JSON for the GUI.
 
 Endpoints (all POST, JSON in / JSON out):
   /api/silo1        {model_name, prompt, image_b64}                 -> one stateless vision call
@@ -66,11 +68,7 @@ Failure          : HTTP 500 + {"status": "error", "message": "<reason>"}
 
 Config is read from /etc/paragon/.env (root-owned, 0640 root:paragon so the
 paragon-run daemon can read it):
-  GCP_PROJECT_ID="..."                                      (required for the Google route;
-                                                             [PATCH:google-optional] may be
-                                                             omitted when LEDGER_ANTHROPIC_API_KEY
-                                                             is set -- at least ONE of the two
-                                                             must be present)
+  GCP_PROJECT_ID="..."                                      (for the Google Vertex route)
   GCP_LOCATION="global"                                     (optional; default "global")
   GOOGLE_APPLICATION_CREDENTIALS="/etc/paragon/sa.json"     (optional; service-account key)
   LEDGER_DEFAULT_MODEL="gemini-3.5-flash"                   (optional fallback model)
@@ -87,11 +85,13 @@ paragon-run daemon can read it):
                                                              Google AI Studio key -> Gemini
                                                              Developer API. Wins over
                                                              GCP_PROJECT_ID when both are set.)
+  LEDGER_AZURE_OPENAI_ENDPOINT="https://<resource>.openai.azure.com"
+  LEDGER_AZURE_TENANT_ID="..."                              (school Entra tenant GUID)
+  LEDGER_AZURE_OPENAI_TIMEOUT_S="300"                       (optional upstream read timeout)
+  LEDGER_AZURE_OPENAI_MAX_OUTPUT_TOKENS="16384"             (optional Azure output ceiling)
 
-Auth uses Application Default Credentials -- the SAME service-account JSON serves
-both providers. The Anthropic path stays fully DORMANT until (a) the anthropic
-SDK is installed in the venv AND (b) a claude-* model id is selected, so a box
-with only google-genai installed runs Gemini exactly as before.
+The Vertex routes share the same Google Application Default Credentials.
+The Anthropic and Azure Identity SDKs are loaded when their routes need them.
 """
 
 import os
@@ -105,6 +105,8 @@ from waitress import serve
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
+
+from azure_provider import AZURE_DEFAULT_MODEL, AZURE_MODELS, AzureOpenAIError, AzureOpenAIProvider
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -169,20 +171,38 @@ except ValueError:
 _GOOGLE_API_KEY = (ENV.get("LEDGER_GOOGLE_API_KEY") or "").strip()
 _HAS_GOOGLE = bool(PROJECT_ID) or bool(_GOOGLE_API_KEY)
 _HAS_ANTHROPIC_KEY = bool((ENV.get("LEDGER_ANTHROPIC_API_KEY") or "").strip())
-if not _HAS_GOOGLE and not _HAS_ANTHROPIC_KEY:
+_azure_endpoint = (ENV.get("LEDGER_AZURE_OPENAI_ENDPOINT") or "").strip()
+_azure_tenant = (ENV.get("LEDGER_AZURE_TENANT_ID") or "").strip()
+_azure_client = None
+_azure_config_error = None
+if _azure_endpoint or _azure_tenant:
+    try:
+        _azure_client = AzureOpenAIProvider(
+            _azure_endpoint,
+            _azure_tenant,
+            ENV.get("LEDGER_AZURE_OPENAI_TIMEOUT_S") or "300",
+            ENV.get("LEDGER_AZURE_OPENAI_MAX_OUTPUT_TOKENS") or "16384",
+        )
+    except AzureOpenAIError as exc:
+        if not (_HAS_GOOGLE or _HAS_ANTHROPIC_KEY):
+            raise
+        _azure_config_error = str(exc)
+        log.warning("Azure OpenAI is unavailable. %s", _azure_config_error)
+
+if not (_HAS_GOOGLE or _HAS_ANTHROPIC_KEY or _azure_client):
     raise RuntimeError(
         "No AI provider is configured in /etc/paragon/.env. Set "
         "LEDGER_GOOGLE_API_KEY (Google AI Studio key), GCP_PROJECT_ID "
-        "(Google Vertex route), and/or LEDGER_ANTHROPIC_API_KEY (direct "
-        "Anthropic route), then restart ledger-daemon.service."
+        "(Google Vertex route), LEDGER_ANTHROPIC_API_KEY (direct Anthropic route), "
+        "or LEDGER_AZURE_OPENAI_ENDPOINT and LEDGER_AZURE_TENANT_ID (Azure OpenAI), "
+        "then restart ledger-daemon.service."
     )
 
-# [PATCH:google-optional] On an Anthropic-only box the shipped Gemini fallback
-# model would be undispatchable; fall back to a Claude model instead so a GUI
-# request that omits model_name still lands on a live route. A box with Google
-# configured keeps the exact v2.x fallback behavior.
+_azure_only = _azure_client is not None and not (_HAS_GOOGLE or _HAS_ANTHROPIC_KEY)
 if not _HAS_GOOGLE and not ENV.get("LEDGER_DEFAULT_MODEL"):
-    DEFAULT_MODEL = "claude-sonnet-5-5"
+    DEFAULT_MODEL = AZURE_DEFAULT_MODEL if _azure_only else "claude-sonnet-5-5"
+if _azure_only and DEFAULT_MODEL.lower() not in AZURE_MODELS:
+    raise RuntimeError("LEDGER_DEFAULT_MODEL must be gpt-6.1-sol or gpt-6-astra on an Azure OpenAI-only install.")
 
 # [PATCH:google-devapi] Which Google route this box is using, surfaced on the
 # health endpoint: "developer-api" (AI Studio key) | "vertex" | "absent".
@@ -209,7 +229,7 @@ if _HAS_GOOGLE:
         _google_route = "vertex"
     # [PATCH:upstream-timeout-end]
 else:
-    # [PATCH:google-optional] Anthropic-only box: the Google client is never
+    # Without Google credentials the Google client is never
     # constructed. Every Google-path caller goes through _require_google(),
     # which converts this None into a clear, GUI-surfaced error message.
     client = None
@@ -223,11 +243,20 @@ def _require_google():
     endpoint handlers surface to the GUI as {"status":"error", ...}."""
     if client is None:
         raise RuntimeError(
-            "This Ledger is initialized for the Anthropic route only -- no Google "
-            "credentials are installed. Select a claude-* model in AI MODEL, or "
-            "re-initialize with Google credentials to use Gemini models."
+            "No Google credentials are installed. Select a model for a configured "
+            "provider in AI MODEL, or re-initialize with Google credentials to use Gemini."
         )
     return client
+
+
+def _require_azure():
+    if _azure_client is None:
+        raise AzureOpenAIError(
+            _azure_config_error or "invalid_request: Azure OpenAI requires LEDGER_AZURE_OPENAI_ENDPOINT "
+            "and LEDGER_AZURE_TENANT_ID in /etc/paragon/.env."
+        )
+    return _azure_client
+
 
 # The Anthropic client is created lazily on first use (see _anthropic_client),
 # so a box without the anthropic SDK installed still serves Gemini normally.
@@ -300,11 +329,10 @@ def _get_anthropic_client():
 
 
 def _provider_for(model_name):
-    """Decide which SDK a model id belongs to. Anthropic Claude ids on Vertex
-    look like 'claude-opus-4-8', 'anthropic/claude-...', or
-    'publishers/anthropic/models/claude-...'. Everything else (gemini-*,
-    meta/llama-*, qwen-*, bare 'publishers/...') goes through google-genai."""
+    """Route model IDs to Azure OpenAI, Anthropic, or google-genai."""
     m = (model_name or "").lower()
+    if m in AZURE_MODELS:
+        return "azure-openai"
     if m.startswith("claude") or "anthropic/" in m or m.startswith("publishers/anthropic"):
         return "anthropic"
     return "google"
@@ -315,6 +343,7 @@ def _provider_for(model_name):
 #   Google    : name = the Vertex cache resource name
 #   Anthropic : name = the sentinel "anthropic-local"; the actual reusable
 #               material is held in _anthropic_ctx and re-sent each grade.
+#   Azure OpenAI : local master images and instructions, sent with each grade.
 # ---------------------------------------------------------------------------
 _cache_lock = threading.Lock()
 _active_cache = {"name": None, "model": None}
@@ -326,11 +355,12 @@ _ANTHROPIC_SENTINEL = "anthropic-local"
 # masters (e.g. short/single-page demos) still grade. Large masters still cache.
 _google_ctx = {"system": "", "image_bytes": []}      # raw PNG bytes for master pages
 _GOOGLE_INLINE = "google-inline"
+_azure_ctx = {"system": "", "image_bytes": []}
+_AZURE_INLINE = "azure-openai-inline"
 
 
 def _purge_active_cache():
-    """Drop the active grading context. For Google, delete the server-side cache.
-    For Anthropic, just clear the locally-held material."""
+    """Clear the local grading context and delete any named Google cache."""
     with _cache_lock:
         name = _active_cache["name"]
         model = _active_cache["model"]
@@ -340,7 +370,9 @@ def _purge_active_cache():
         _anthropic_ctx["image_bytes"] = []
         _google_ctx["system"] = ""
         _google_ctx["image_bytes"] = []
-    if name and name not in (_ANTHROPIC_SENTINEL, _GOOGLE_INLINE):
+        _azure_ctx["system"] = ""
+        _azure_ctx["image_bytes"] = []
+    if name and name not in (_ANTHROPIC_SENTINEL, _GOOGLE_INLINE, _AZURE_INLINE):
         # [PATCH:google-optional] a named Google cache cannot exist on a box
         # with no Vertex client, but guard anyway rather than crash a purge.
         if client is None:
@@ -355,6 +387,8 @@ def _purge_active_cache():
         log.info("Cleared Anthropic local grading context (model=%s).", model)
     elif name == _GOOGLE_INLINE:
         log.info("Cleared Google inline grading context (model=%s).", model)
+    elif name == _AZURE_INLINE:
+        log.info("Cleared Azure OpenAI grading context (model=%s).", model)
 
 
 def _is_cache_too_small(exc):
@@ -562,6 +596,8 @@ def health():
         "anthropic_region": ANTHROPIC_REGION,
         "anthropic_route": _anthropic_route,   # [PATCH:direct-api] "direct-api" | "vertex"
         "google_route": _google_route,   # [PATCH:google-devapi] "developer-api" | "vertex" | "absent"
+        "azure_openai_route": "entra-cli" if _azure_client is not None else "absent",
+        **({"azure_openai_default_model": DEFAULT_MODEL} if _azure_only else {}),
         "anthropic_sdk_installed": anthropic_available,
         "cache_active": cache_active,
         "cache_model": cache_model,
@@ -579,8 +615,13 @@ def silo1():
         model_name = body.get("model_name") or DEFAULT_MODEL
         prompt = body.get("prompt", "")
         png = _decode_png(body.get("image_b64"))
+        provider = _provider_for(model_name)
 
-        if _provider_for(model_name) == "anthropic":
+        if provider == "azure-openai":
+            text = _require_azure().respond(model_name, prompt, [png])
+            return jsonify({"status": "success", "text": text})
+
+        if provider == "anthropic":
             ac = _get_anthropic_client()
             msg = ac.messages.create(
                 model=model_name,
@@ -621,7 +662,20 @@ def cache_build():
         # Never stack contexts: drop any prior one first.
         _purge_active_cache()
 
-        if _provider_for(model_name) == "anthropic":
+        provider = _provider_for(model_name)
+        if provider == "azure-openai":
+            _require_azure()
+            img_bytes = [_decode_png(b) for b in images_b64]
+            with _cache_lock:
+                _azure_ctx["system"] = system_instruction
+                _azure_ctx["image_bytes"] = img_bytes
+                _active_cache["name"] = _AZURE_INLINE
+                _active_cache["model"] = model_name
+            log.info("Azure OpenAI grading context staged (model=%s, %d master image(s)).",
+                     model_name, len(img_bytes))
+            return jsonify({"status": "success", "text": _AZURE_INLINE})
+
+        if provider == "anthropic":
             # No server-side named cache for Anthropic: hold the material locally
             # and re-send it (cache_control'd) on every grade.
             _get_anthropic_client()  # validate SDK presence now, fail early if missing
@@ -743,10 +797,23 @@ def silo2():
             anthropic_imgs = list(_anthropic_ctx["image_bytes"])
             google_system = _google_ctx["system"]
             google_imgs = list(_google_ctx["image_bytes"])
+            azure_system = _azure_ctx["system"]
+            azure_imgs = list(_azure_ctx["image_bytes"])
         if not cache_name:
             raise RuntimeError("No active evaluation context. Call /api/cache/build first.")
 
-        if _provider_for(cache_model) == "anthropic":
+        provider = _provider_for(cache_model)
+        if provider == "azure-openai":
+            if schema is None:
+                raise AzureOpenAIError("invalid_request: Azure OpenAI requires the Ledger grading schema.")
+            masters = master_pngs if master_pngs is not None else azure_imgs
+            text = _require_azure().respond(
+                cache_model, prompt, [*masters, *live_pngs],
+                instructions=azure_system, grading_schema=schema,
+            )
+            return jsonify({"status": "success", "text": text})
+
+        if provider == "anthropic":
             ac = _get_anthropic_client()
             # [PATCH:payload-governor] live pages get the same normalization
             # the masters got at cache/build.
@@ -897,7 +964,8 @@ def silo2():
 
 
 if __name__ == "__main__":
-    log.info("Ledger AI daemon (v2.9, multi-provider + direct Anthropic API route + multi-image Silo 2 + Google-optional + vendor-default sampling + per-chunk master context + Gemini Developer-API route) listening on http://%s:%d", HOST, PORT)
+    log.info("Ledger AI daemon listening on http://%s:%d", HOST, PORT)
     log.info("Google route for this box: %s", _google_route)
     log.info("Claude route for this box: %s", _anthropic_route)
+    log.info("Azure OpenAI route for this box: %s", "entra-cli" if _azure_client is not None else "absent")
     serve(app, host=HOST, port=PORT, threads=4)
