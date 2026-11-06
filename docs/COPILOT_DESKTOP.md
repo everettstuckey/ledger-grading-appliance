@@ -25,7 +25,9 @@ Use the result only if the port listens on loopback. If you choose a different p
 
 ## Connect the appliance
 
-From the Ledger appliance, forward the bridge port through an existing approved SSH connection to the Windows computer. Keep the tunnel open while grading.
+When Ledger and the bridge run on the same Windows PC, Ledger connects to the bridge over localhost. Follow the [Windows setup guide](WINDOWS.md) and enter the bridge token in **System Initialization**.
+
+For a separate Debian appliance, forward the bridge port through an existing approved SSH connection to the Windows computer. Keep the tunnel open while grading.
 
 ~~~bash
 ssh -NT -o ExitOnForwardFailure=yes -L 127.0.0.1:8790:127.0.0.1:8790 operator@windows-host
@@ -33,7 +35,7 @@ ssh -NT -o ExitOnForwardFailure=yes -L 127.0.0.1:8790:127.0.0.1:8790 operator@wi
 
 For a new installation, enter the token in Ledger's **System Initialization** screen. For an existing installation, use the upgrade steps below. Select `copilot/gpt-6.1-sol` or `copilot/gpt-6-astra` in **AI Model** and run a synthetic batch. Keep the work account selected and leave the Copilot chat available to the bridge during the batch. Ledger checks the returned data before accepting the transcription or grades. The bridge accepts up to 20 images per request, including reference pages. For long essays, set `LEDGER_ESSAY_MAX_PAGES_PER_CALL` in the GUI environment to leave room for the reference pages. After a failed upload or send, check the desktop app for a leftover draft before retrying.
 
-## Existing Ledger installations
+## Existing Debian Ledger installations
 
 Close Ledger and back up local modifications. The installer preserves the engine and daemon files on existing appliances, so copy the updated files after stopping the daemon.
 

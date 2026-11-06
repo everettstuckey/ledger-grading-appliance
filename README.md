@@ -49,6 +49,8 @@ When a Google AI Studio key is entered, the setup screen requires the operator t
 
 ## Building a test machine
 
+Ledger also runs as a native Windows desktop app. [Windows setup](docs/WINDOWS.md).
+
 | Item | Notes |
 |---|---|
 | A small-form-factor PC dedicated to testing | The reference build is a Lenovo ThinkCentre M700 10HY002AUS. Any SSD. |

@@ -107,10 +107,13 @@ The Anthropic and Azure Identity SDKs are loaded when their routes need them.
 import os
 import base64
 import logging
+import secrets
+import sys
 import threading
+from pathlib import Path
 
 from flask import Flask, request, jsonify
-from waitress import serve
+from waitress import create_server, serve
 
 from google import genai
 from google.genai import types
@@ -129,6 +132,8 @@ from copilot_provider import COPILOT_DEFAULT_MODEL, COPILOT_MODELS, CopilotProvi
 ENV_PATH = os.environ.get("LEDGER_ENV_PATH") or "/etc/paragon/.env"
 HOST = "127.0.0.1"
 PORT = 5000
+_WINDOWS_READY_FILE = os.environ.get("LEDGER_DAEMON_READY_FILE")
+_WINDOWS_LOCAL_TOKEN = os.environ.get("LEDGER_DAEMON_LOCAL_TOKEN")
 CACHE_TTL = "43200s"                  # 12 hours, matching the GUI's note (Google path)
 FALLBACK_MODEL = "gemini-4-argon"   # current Gemini flagship (GA 2026-10-13)
 
@@ -203,8 +208,11 @@ _codex_client = None
 _codex_config_error = None
 if (ENV.get("LEDGER_CODEX_ENABLED") or "").strip().lower() == "true":
     try:
+        job_dir = (ENV.get("LEDGER_CODEX_JOB_DIR") or "").strip()
+        if not job_dir and _WINDOWS_READY_FILE and os.environ.get("LEDGER_WORKSPACE_PATH"):
+            job_dir = str(Path(os.environ["LEDGER_WORKSPACE_PATH"]) / ".Codex Jobs")
         _codex_client = CodexProvider(
-            (ENV.get("LEDGER_CODEX_JOB_DIR") or "").strip(),
+            job_dir,
             ENV.get("LEDGER_CODEX_TIMEOUT_S") or "300",
         )
     except CodexProviderError as exc:
@@ -656,6 +664,16 @@ def _schema_instructions(schema):
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
 
+if _WINDOWS_READY_FILE:
+    if not _WINDOWS_LOCAL_TOKEN:
+        raise RuntimeError("The managed Ledger daemon requires a local authorization token.")
+
+    @app.before_request
+    def _verify_local_client():
+        provided = request.headers.get("Authorization", "")
+        if not provided.isascii() or not secrets.compare_digest(provided, f"Bearer {_WINDOWS_LOCAL_TOKEN}"):
+            return jsonify({"status": "error", "message": "Unauthorized Ledger client."}), 401
+
 
 @app.get("/")
 def health():
@@ -1072,10 +1090,28 @@ def silo2():
 
 
 if __name__ == "__main__":
-    log.info("Ledger AI daemon listening on http://%s:%d", HOST, PORT)
     log.info("Google route for this box: %s", _google_route)
     log.info("Claude route for this box: %s", _anthropic_route)
     log.info("Azure OpenAI route for this box: %s", "entra-cli" if _azure_client is not None else "absent")
     log.info("Codex desktop route for this box: %s", "desktop" if _codex_client is not None else "absent")
     log.info("Copilot desktop route for this box: %s", "desktop-bridge" if _copilot_client is not None else "absent")
-    serve(app, host=HOST, port=PORT, threads=4)
+    if _WINDOWS_READY_FILE:
+        # The bound port is read through a private startup file, so the GUI
+        # never has to guess whether a local listener belongs to Ledger.
+        server = create_server(app, host=HOST, port=0, threads=4)
+
+        def _watch_parent():
+            # The GUI owns the write end. EOF also covers a GUI crash.
+            sys.stdin.buffer.read(1)
+            os._exit(0)
+
+        threading.Thread(target=_watch_parent, daemon=True).start()
+        log.info("Ledger AI daemon listening on http://%s:%s", HOST, server.effective_port)
+        ready = Path(_WINDOWS_READY_FILE)
+        temporary = ready.with_suffix(".tmp")
+        temporary.write_text(str(server.effective_port), encoding="ascii")
+        temporary.replace(ready)
+        server.run()
+    else:
+        log.info("Ledger AI daemon listening on http://%s:%d", HOST, PORT)
+        serve(app, host=HOST, port=PORT, threads=4)

@@ -1,5 +1,7 @@
 # Building an Evaluation Machine
 
+For the native Windows app, see [Windows setup](WINDOWS.md). The appliance installation below uses Debian.
+
 > Experimental software for evaluation by school and district IT professionals; see [DISCLAIMER.md](../DISCLAIMER.md).
 > These steps build a **test** machine with no disk encryption, hardware-key login or kiosk lockdown. Use test material, and get the approvals your institution requires before processing any student work.
 

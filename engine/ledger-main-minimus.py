@@ -210,7 +210,12 @@ def _read_boxed_digits(gray, contour, thresh, lo=None, hi=None):
     return best[0], str(best[0])
 # --- end [PATCH:boxed-digit-ocr] -------------------------------------------
 import getpass
-import grp
+
+if os.name == "nt":
+    from ledger_tools import configure_tesseract, xelatex_command
+    from ledger_windows import WindowsRuntime, workspace_path
+else:
+    import grp
 
 # Identify the active user's home directory for data siloing
 HOME_DIR = os.path.expanduser("~")
@@ -218,8 +223,35 @@ HOME_DIR = os.path.expanduser("~")
 # Dynamically bind the Engine directory to the script's actual location in the unified vault
 ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+def _read_cv_image(path):
+    if os.name != "nt":
+        return cv2.imread(path)
+    try:
+        data = np.fromfile(path, dtype=np.uint8)
+    except OSError:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_COLOR) if data.size else None
+
+
+def _write_cv_image(path, image):
+    if os.name != "nt":
+        return cv2.imwrite(path, image)
+    encoded, data = cv2.imencode(os.path.splitext(path)[1], image)
+    if not encoded:
+        return False
+    try:
+        data.tofile(path)
+    except OSError:
+        return False
+    return True
+
+
+def _windows_report_name(name):
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).rstrip(" .") or "Unknown"
+
+
 # The Teacher's Siloed Workspace
-LEDGER_DIR = os.path.join(HOME_DIR, "Ledger Workspace")
+LEDGER_DIR = str(workspace_path()) if os.name == "nt" else os.path.join(HOME_DIR, "Ledger Workspace")
 
 # Siloed App Data (Hidden with a '.' to keep the teacher's visible workspace clean)
 TEMP_DIR = os.path.join(LEDGER_DIR, ".Temp-Ledger-Files")
@@ -461,8 +493,10 @@ class DesktopOcrError(RuntimeError):
 
 
 class LedgerGUI:
-    def __init__(self, root):
+    def __init__(self, root, runtime=None):
         self.root = root
+        self.runtime = runtime
+        self._xelatex = "xelatex"
         self.root.title("DASHBOARD - EXPERIMENTAL EVALUATION BUILD")
         # [PATCH:topbar-fit] 1100 px cannot seat the essay-mode control row
         # (RUN + MAX SCORE + MODE selector + SHUT DOWN) -- the SHUT DOWN
@@ -485,7 +519,7 @@ class LedgerGUI:
         self.master_group_key = None
         self.master_display_title = None
         
-        self.roster = self.load_roster()
+        self.roster = {} if self.runtime is not None else self.load_roster()
         
         self.header_font = ctk.CTkFont(family="Ubuntu", size=24, weight="bold")
         self.main_font = ctk.CTkFont(family="Ubuntu", size=18)
@@ -494,10 +528,17 @@ class LedgerGUI:
         self.setup_ui()
         self.verify_directories()
         self.initialize_database()
+        if self.runtime is not None:
+            self.roster = self.load_roster()
         self.clean_temp_directory() 
         self.setup_logging()
         self.check_first_run()
         
+    def _daemon_request(self, method, endpoint, **kwargs):
+        if self.runtime is not None:
+            return self.runtime.request(method, endpoint, **kwargs)
+        return requests.request(method, "http://127.0.0.1:5000" + endpoint, **kwargs)
+
     def load_roster(self):
         """Loads the roster into memory directly from the SQLite Database."""
         roster = {}
@@ -587,58 +628,48 @@ class LedgerGUI:
         )
         self.model_btn.grid(row=9, column=0, padx=20, pady=(10, 10))
 
-        # --- OS-LEVEL GROUP AUTHENTICATION FOR SYSTEM CONTROLS ---
-        try:
-            current_user = getpass.getuser()
-            admin_groups = ['faculty-admin', 'district-admin', 'sudo']
-            user_groups = [g.gr_name for g in grp.getgrall() if current_user in g.gr_mem]
-            
-            # EDIT LEDGER PROMPT - available to ALL tiers; each account edits its OWN prompt copy.
-            self.edit_prompt_btn = ctk.CTkButton(
-                self.sidebar,
-                text="EDIT LEDGER PROMPT",
-                font=self.main_font,
-                fg_color="#333333",
-                hover_color="#555555",
-                command=self.open_prompt_editor
-            )
-            self.edit_prompt_btn.grid(row=8, column=0, padx=20, pady=(10, 10))
+        self.edit_prompt_btn = ctk.CTkButton(
+            self.sidebar,
+            text="EDIT LEDGER PROMPT",
+            font=self.main_font,
+            fg_color="#333333",
+            hover_color="#555555",
+            command=self.open_prompt_editor
+        )
+        self.edit_prompt_btn.grid(row=8, column=0, padx=20, pady=(10, 10))
 
-            # ADVANCED / MANAGE OS USERS stay admin-gated (factory reset + account mgmt).
-            if current_user == 'paragon' or any(group in user_groups for group in admin_groups):
-                
-                # ADVANCED SETTINGS BUTTON
+        try:
+            if self.runtime is not None:
+                is_admin = True
+                appliance_tools = False
+            else:
+                current_user = getpass.getuser()
+                admin_groups = ['faculty-admin', 'district-admin', 'sudo']
+                user_groups = [g.gr_name for g in grp.getgrall() if current_user in g.gr_mem]
+                is_admin = current_user == 'paragon' or any(group in user_groups for group in admin_groups)
+                appliance_tools = (os.path.exists("/opt/ledger/engine/ledger-keymgr-gui.py")
+                                   and os.path.exists("/usr/local/sbin/ledger-usermgr"))
+
+            if is_admin:
                 self.advanced_btn = ctk.CTkButton(
-                    self.sidebar, 
-                    text="ADVANCED", 
-                    font=self.main_font, 
-                    fg_color="#333333", 
-                    hover_color="#555555", 
+                    self.sidebar,
+                    text="ADVANCED",
+                    font=self.main_font,
+                    fg_color="#333333",
+                    hover_color="#555555",
                     command=self.open_advanced_settings
                 )
                 self.advanced_btn.grid(row=10, column=0, padx=20, pady=(10, 10))
-        except Exception as e:
-            self.log_message(f"[!] OS Group Authentication Check Failed: {e}")
-
-        # --- ROLE-BASED FIDO2 & USER MANAGEMENT ---
-        try:
-            current_user = getpass.getuser()
-            admin_groups = ['faculty-admin', 'district-admin', 'sudo']
-            user_groups = [g.gr_name for g in grp.getgrall() if current_user in g.gr_mem]
-            is_admin = current_user == 'paragon' or any(group in user_groups for group in admin_groups)
-            # Keys & Accounts buttons exist only on the hardened appliance build (keymgr GUI + usermgr helper).
-            appliance_tools = (os.path.exists("/opt/ledger/engine/ledger-keymgr-gui.py")
-                               and os.path.exists("/usr/local/sbin/ledger-usermgr"))
 
             if appliance_tools and is_admin:
                 self.manage_users_btn = ctk.CTkButton(
-                    self.sidebar, text="MANAGE OS USERS", font=self.main_font, 
+                    self.sidebar, text="MANAGE OS USERS", font=self.main_font,
                     fg_color="#333333", hover_color="#555555", command=self.open_keys_and_accounts
                 )
                 self.manage_users_btn.grid(row=11, column=0, padx=20, pady=(10, 10))
             elif appliance_tools:
                 self.enroll_key_btn = ctk.CTkButton(
-                    self.sidebar, text="REGISTER MY KEY", font=self.main_font, 
+                    self.sidebar, text="REGISTER MY KEY", font=self.main_font,
                     fg_color="#333333", hover_color="#555555", command=self.open_keys_and_accounts
                 )
                 self.enroll_key_btn.grid(row=11, column=0, padx=20, pady=(10, 10))
@@ -722,17 +753,24 @@ class LedgerGUI:
         self._add_textbox_menu(self.log_text)
 
     def load_master_pdf(self):
-        try:
-            # Force the native Linux Mint file picker
-            result = subprocess.run(
-                ['zenity', '--file-selection', f'--filename={MASTER_DIR}/', '--title=SELECT BLANK MASTER PDF', '--file-filter=PDF files | *.pdf'],
-                capture_output=True, text=True
-            )
-            file_path = result.stdout.strip()
-        except FileNotFoundError:
-            # Safety fallback to Tkinter if zenity fails
-            file_path = filedialog.askopenfilename(initialdir=MASTER_DIR, title="SELECT BLANK MASTER PDF", filetypes=[("PDF Files", "*.pdf")])
-            
+        picker_options = {
+            "initialdir": MASTER_DIR,
+            "title": "SELECT BLANK MASTER PDF",
+            "filetypes": [("PDF Files", "*.pdf")],
+        }
+        if self.runtime is not None:
+            file_path = filedialog.askopenfilename(parent=self.root, **picker_options)
+        else:
+            try:
+                result = subprocess.run(
+                    ['zenity', '--file-selection', f'--filename={MASTER_DIR}/',
+                     '--title=SELECT BLANK MASTER PDF', '--file-filter=PDF files | *.pdf'],
+                    capture_output=True, text=True
+                )
+                file_path = result.stdout.strip()
+            except FileNotFoundError:
+                file_path = filedialog.askopenfilename(**picker_options)
+
         if file_path:
             self.master_pdf_path = file_path
             filename = os.path.basename(file_path)
@@ -751,14 +789,14 @@ class LedgerGUI:
             pix.save(temp_master_img_path)
             doc.close()
 
-            img = cv2.imread(temp_master_img_path)
+            img = _read_cv_image(temp_master_img_path)
             
             # Execute array slice using dynamic database coordinates
             t_coords = self.get_crop_coordinates('crop_title')
             title_crop = img[t_coords[1] : t_coords[1]+t_coords[3], t_coords[0] : t_coords[0]+t_coords[2]]
             
             temp_crop_path = os.path.join(TEMP_DIR, "temp_master_title_crop.png")
-            cv2.imwrite(temp_crop_path, title_crop)
+            _write_cv_image(temp_crop_path, title_crop)
 
             base64_img = self.image_to_base64_png(temp_crop_path)
 
@@ -778,7 +816,7 @@ class LedgerGUI:
             if not use_desktop:
                 time.sleep(10) # Network buffer before establishing Silo 1 session
             timeout = DESKTOP_OCR_TIMEOUT if use_desktop else 60
-            response = requests.post("http://127.0.0.1:5000/api/silo1", json=payload, timeout=timeout)
+            response = self._daemon_request("POST", "/api/silo1", json=payload, timeout=timeout)
             if not self.is_running:
                 return
             
@@ -906,8 +944,9 @@ class LedgerGUI:
             self.log_message(f"[!] Database Initialization Error: {e}")
 
     def _is_initializer(self):
-        """True ONLY for the District Administrator tier or the owner.
-        These are the only roles allowed to see SYSTEM INITIALIZATION."""
+        """Allow setup for the Windows user or a Debian appliance initializer."""
+        if self.runtime is not None:
+            return True
         try:
             current_user = getpass.getuser()
             init_groups = ['district-admin', 'sudo']
@@ -917,12 +956,9 @@ class LedgerGUI:
             return False
 
     def check_first_run(self):
-        """Show SYSTEM INITIALIZATION only to a District Administrator (or owner),
-        and only while the appliance is not yet initialized. The authoritative,
-        system-wide 'initialized' signal is the world-readable marker
-        /etc/ledger-initialized (NOT the per-user database, which only records
-        who signed in on THIS account)."""
-        system_initialized = os.path.exists('/etc/ledger-initialized')
+        """Use the initialized marker for this Windows account or Debian appliance."""
+        marker = self.runtime.init_path if self.runtime is not None else '/etc/ledger-initialized'
+        system_initialized = os.path.exists(marker)
         if system_initialized:
             return  # Already set up -> every tier just runs.
         if self._is_initializer():
@@ -1040,8 +1076,10 @@ class LedgerGUI:
             ctk.CTkLabel(azure_frame, text=label, font=self.main_font).grid(row=row, column=0, sticky="w", padx=10)
             ctk.CTkEntry(azure_frame, font=self.main_font, width=350, textvariable=variable).grid(
                 row=row, column=1, pady=4)
-        ctk.CTkLabel(azure_frame, text="For Azure, sign in with Azure CLI as the paragon user.",
-                     font=note_font).grid(row=2, column=0, columnspan=2, pady=(0, 4))
+        azure_note = ("For Azure, sign in with Azure CLI as your Windows user." if self.runtime is not None
+                      else "For Azure, sign in with Azure CLI as the paragon user.")
+        ctk.CTkLabel(azure_frame, text=azure_note, font=note_font).grid(
+            row=2, column=0, columnspan=2, pady=(0, 4))
 
         codex_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(body, text="Use Codex desktop for evaluation", variable=codex_var,
@@ -1050,8 +1088,9 @@ class LedgerGUI:
                      font=note_font).pack(pady=(0, 8))
 
         _, copilot_token_var = _masked_row(body, "COPILOT BRIDGE TOKEN:")
-        ctk.CTkLabel(body, text="For Copilot, start the Windows bridge and SSH tunnel before grading.",
-                     font=note_font).pack(pady=(0, 8))
+        copilot_note = ("For Copilot, start the bridge on this computer before grading." if self.runtime is not None
+                        else "For Copilot, start the Windows bridge and SSH tunnel before grading.")
+        ctk.CTkLabel(body, text=copilot_note, font=note_font).pack(pady=(0, 8))
 
         # One-line provider rule so the operator knows what unlocks the button.
         provider_rule = ctk.CTkLabel(body, text=WIZARD_DEFAULT_RULE, font=note_font,
@@ -1100,21 +1139,24 @@ class LedgerGUI:
 
         def import_google_creds():
             try:
-                # Release the modal grab BEFORE the GTK picker opens. A held Tk
-                # grab plus an external dialog deadlocks X input (the whole
-                # screen freezes). The finally re-grabs so the lock always
-                # comes back, even if the picker errors out.
-                setup_win.grab_release()
-                try:
-                    result = subprocess.run(
-                        ['zenity', '--file-selection',
-                         '--title=SELECT GOOGLE SERVICE-ACCOUNT KEY (.json)',
-                         '--file-filter=Google credentials | *.json'],
-                        capture_output=True, text=True
+                if self.runtime is not None:
+                    picked = filedialog.askopenfilename(
+                        parent=setup_win, title="SELECT GOOGLE SERVICE-ACCOUNT KEY (.json)",
+                        filetypes=[("Google credentials", "*.json")],
                     )
-                finally:
-                    setup_win.grab_set()
-                picked = result.stdout.strip()
+                else:
+                    # Release the Tk grab while the external GTK picker is open.
+                    setup_win.grab_release()
+                    try:
+                        result = subprocess.run(
+                            ['zenity', '--file-selection',
+                             '--title=SELECT GOOGLE SERVICE-ACCOUNT KEY (.json)',
+                             '--file-filter=Google credentials | *.json'],
+                            capture_output=True, text=True
+                        )
+                        picked = result.stdout.strip()
+                    finally:
+                        setup_win.grab_set()
                 if picked:
                     creds_state['path'] = picked
                     creds_status.configure(text=f"Loaded: {os.path.basename(picked)}",
@@ -1167,9 +1209,10 @@ class LedgerGUI:
                 self.log_message(f"[!] SSL Injection Error: {e}")
                 setup_win.grab_set()
 
-        ssl_btn = ctk.CTkButton(adv_frame, text="INSTALL ROOT CA CERT (OPTIONAL)", font=self.main_font,
-                                fg_color="#1f538d", hover_color="#14375e", command=inject_ssl_cert)
-        ssl_btn.pack(pady=(4, 12))
+        if self.runtime is None:
+            ssl_btn = ctk.CTkButton(adv_frame, text="INSTALL ROOT CA CERT (OPTIONAL)", font=self.main_font,
+                                    fg_color="#1f538d", hover_color="#14375e", command=inject_ssl_cert)
+            ssl_btn.pack(pady=(4, 12))
 
         def toggle_advanced():
             adv_state["open"] = not adv_state["open"]
@@ -1207,7 +1250,8 @@ class LedgerGUI:
         liability_cb.pack(pady=(10, 14))
 
         submit_btn = ctk.CTkButton(
-            body, text="AUTHORIZE APPLIANCE", font=self.header_font, height=50,
+            body, text="Authorize Ledger" if self.runtime is not None else "AUTHORIZE APPLIANCE",
+            font=self.header_font, height=50,
             fg_color="#333333", state="disabled"
         )
         submit_btn.pack(pady=(4, 14))
@@ -1363,87 +1407,97 @@ class LedgerGUI:
             use_copilot = st["use_copilot"]
 
             if st["ok"] and rep_name:
-                # 1. Stage .env, the service-account key (Vertex route only),
-                #    and the init marker in the per-user temp dir. Paths are
-                #    handled in Python so spaces / odd characters in the picked
-                #    file are safe. No credential value is ever logged.
-                temp_sa = os.path.join(TEMP_DIR, "sa.json.temp")
-                temp_marker = os.path.join(TEMP_DIR, "initialized.temp")
-                with tempfile.NamedTemporaryFile(mode="w", dir=TEMP_DIR, prefix=".env-", delete=False) as f:
-                    temp_env = f.name
-                    if use_ai:
-                        # Daemon v2.9 builds genai.Client(api_key=...) from this
-                        # (Gemini Developer API). Same custody as the other keys:
-                        # /etc/paragon/.env, root:paragon 0640, never the DB.
-                        f.write(f'LEDGER_GOOGLE_API_KEY="{ai_key}"\n')
-                    if use_vertex:
-                        f.write(f'GCP_PROJECT_ID="{new_key}"\n')
-                        f.write('GCP_LOCATION="global"\n')
-                        f.write('GOOGLE_APPLICATION_CREDENTIALS="/etc/paragon/sa.json"\n')
-                    if use_anthropic:
-                        # Daemon v2.4 reads this and routes claude-* models to
-                        # the DIRECT Anthropic API.
-                        f.write(f'LEDGER_ANTHROPIC_API_KEY="{anth_key}"\n')
-                    if use_azure:
-                        f.write(f'LEDGER_AZURE_OPENAI_ENDPOINT="{azure_endpoint}"\n')
-                        f.write(f'LEDGER_AZURE_TENANT_ID="{azure_tenant}"\n')
-                    if use_codex:
-                        f.write('LEDGER_CODEX_ENABLED="true"\n')
-                    if use_copilot:
-                        f.write(f'LEDGER_COPILOT_BRIDGE_URL="{COPILOT_BRIDGE_URL}"\n')
-                        f.write(f'LEDGER_COPILOT_BRIDGE_TOKEN="{copilot_token}"\n')
+                env_lines = []
+                if use_ai:
+                    env_lines.append(f'LEDGER_GOOGLE_API_KEY="{ai_key}"\n')
                 if use_vertex:
+                    sa_path = self.runtime.sa_path if self.runtime is not None else "/etc/paragon/sa.json"
+                    env_lines.extend((
+                        f'GCP_PROJECT_ID="{new_key}"\n',
+                        'GCP_LOCATION="global"\n',
+                        f'GOOGLE_APPLICATION_CREDENTIALS="{sa_path}"\n',
+                    ))
+                if use_anthropic:
+                    env_lines.append(f'LEDGER_ANTHROPIC_API_KEY="{anth_key}"\n')
+                if use_azure:
+                    env_lines.extend((
+                        f'LEDGER_AZURE_OPENAI_ENDPOINT="{azure_endpoint}"\n',
+                        f'LEDGER_AZURE_TENANT_ID="{azure_tenant}"\n',
+                    ))
+                if use_codex:
+                    env_lines.append('LEDGER_CODEX_ENABLED="true"\n')
+                if use_copilot:
+                    env_lines.extend((
+                        f'LEDGER_COPILOT_BRIDGE_URL="{COPILOT_BRIDGE_URL}"\n',
+                        f'LEDGER_COPILOT_BRIDGE_TOKEN="{copilot_token}"\n',
+                    ))
+                env_text = "".join(env_lines)
+                marker_text = f"initialized_by={rep_name}\ninitialized_at={timestamp}\n"
+
+                if self.runtime is not None:
                     try:
-                        shutil.copy(creds_state['path'], temp_sa)
-                    except Exception as e:
-                        os.unlink(temp_env)
-                        self.log_message(f"[!] ERROR: Could not read the credentials file: {e}")
+                        self.runtime.save_setup(env_text, creds_state['path'] if use_vertex else None, marker_text)
+                    except (OSError, RuntimeError) as exc:
+                        messagebox.showerror("Ledger setup", str(exc), parent=setup_win)
                         return
-                with open(temp_marker, "w") as f:
-                    f.write(f"initialized_by={rep_name}\n")
-                    f.write(f"initialized_at={timestamp}\n")
+                else:
+                    # The appliance installs its settings through one privileged step.
+                    temp_sa = os.path.join(TEMP_DIR, "sa.json.temp")
+                    temp_marker = os.path.join(TEMP_DIR, "initialized.temp")
+                    with tempfile.NamedTemporaryFile(mode="w", dir=TEMP_DIR, prefix=".env-", delete=False) as f:
+                        temp_env = f.name
+                        f.write(env_text)
+                    if use_vertex:
+                        try:
+                            shutil.copy(creds_state['path'], temp_sa)
+                        except Exception as e:
+                            os.unlink(temp_env)
+                            self.log_message(f"[!] ERROR: Could not read the credentials file: {e}")
+                            return
+                    with open(temp_marker, "w") as f:
+                        f.write(marker_text)
 
-                # 2. ONE privileged step: create /etc/paragon, install .env (and
-                #    sa.json when the Vertex route is used) with daemon-readable
-                #    perms (root:paragon 0640), drop the world-readable
-                #    'initialized' marker, restart the daemon. A non-Vertex
-                #    install also REMOVES any stale sa.json so a re-initialized
-                #    box can't silently keep a prior Google Cloud identity.
-                self.log_message("Requesting your password to secure credentials...")
+                    # 2. ONE privileged step: create /etc/paragon, install .env (and
+                    #    sa.json when the Vertex route is used) with daemon-readable
+                    #    perms (root:paragon 0640), drop the world-readable
+                    #    'initialized' marker, restart the daemon. A non-Vertex
+                    #    install also REMOVES any stale sa.json so a re-initialized
+                    #    box can't silently keep a prior Google Cloud identity.
+                    self.log_message("Requesting your password to secure credentials...")
 
-                # Release the GUI input lock so the OS password prompt is usable
-                setup_win.grab_release()
+                    # Release the GUI input lock so the OS password prompt is usable
+                    setup_win.grab_release()
 
-                try:
-                    # Credential install is fatal-on-error (set -e); the daemon
-                    # (re)start is best-effort -- it must NOT undo a good save if
-                    # the broker isn't placed yet (system map register #1).
-                    sa_step = (
-                        f"mv '{temp_sa}' /etc/paragon/sa.json; "
-                        "chown root:paragon /etc/paragon/sa.json; chmod 640 /etc/paragon/sa.json; "
-                        if use_vertex else
-                        "rm -f /etc/paragon/sa.json; "
-                    )
-                    combined_command = (
-                        "set -e; "
-                        "install -d -o root -g paragon -m 0750 /etc/paragon; "
-                        f"mv '{temp_env}' /etc/paragon/.env; "
-                        "chown root:paragon /etc/paragon/.env; chmod 640 /etc/paragon/.env; "
-                        + sa_step +
-                        f"mv '{temp_marker}' /etc/ledger-initialized; "
-                        "chown root:root /etc/ledger-initialized; chmod 644 /etc/ledger-initialized; "
-                        "set +e; systemctl restart ledger-daemon.service; exit 0"
-                    )
-                    subprocess.run(['pkexec', 'sh', '-c', combined_command], check=True)
+                    try:
+                        # Credential install is fatal-on-error (set -e); the daemon
+                        # (re)start is best-effort -- it must NOT undo a good save if
+                        # the broker isn't placed yet (system map register #1).
+                        sa_step = (
+                            f"mv '{temp_sa}' /etc/paragon/sa.json; "
+                            "chown root:paragon /etc/paragon/sa.json; chmod 640 /etc/paragon/sa.json; "
+                            if use_vertex else
+                            "rm -f /etc/paragon/sa.json; "
+                        )
+                        combined_command = (
+                            "set -e; "
+                            "install -d -o root -g paragon -m 0750 /etc/paragon; "
+                            f"mv '{temp_env}' /etc/paragon/.env; "
+                            "chown root:paragon /etc/paragon/.env; chmod 640 /etc/paragon/.env; "
+                            + sa_step +
+                            f"mv '{temp_marker}' /etc/ledger-initialized; "
+                            "chown root:root /etc/ledger-initialized; chmod 644 /etc/ledger-initialized; "
+                            "set +e; systemctl restart ledger-daemon.service; exit 0"
+                        )
+                        subprocess.run(['pkexec', 'sh', '-c', combined_command], check=True)
 
-                except subprocess.CalledProcessError:
-                    self.log_message("[!] ERROR: Password prompt failed or was cancelled. Keys not saved.")
-                    # Re-engage the lock if the password prompt fails or is canceled
-                    setup_win.grab_set()
-                    return
-                finally:
-                    if os.path.exists(temp_env):
-                        os.unlink(temp_env)
+                    except subprocess.CalledProcessError:
+                        self.log_message("[!] ERROR: Password prompt failed or was cancelled. Keys not saved.")
+                        # Re-engage the lock if the password prompt fails or is canceled
+                        setup_win.grab_set()
+                        return
+                    finally:
+                        if os.path.exists(temp_env):
+                            os.unlink(temp_env)
 
                 # 3. Record the authorization in the SQLite database. The
                 #    liability_institution key is kept for schema compatibility
@@ -1655,7 +1709,7 @@ class LedgerGUI:
         except Exception as e:
             self.log_message(f"[!] Database Read Error (Model): {e}")
         try:
-            health = requests.get("http://127.0.0.1:5000/", timeout=1)
+            health = self._daemon_request("GET", "/", timeout=1)
             health.raise_for_status()
             providers = health.json()
             return (providers.get("codex_default_model") or providers.get("copilot_default_model")
@@ -1755,7 +1809,7 @@ class LedgerGUI:
     def open_codex_handoff(self, window):
         """Open a draft in the Codex desktop app for the configured job folder."""
         try:
-            response = requests.get("http://127.0.0.1:5000/", timeout=2)
+            response = self._daemon_request("GET", "/", timeout=2)
             response.raise_for_status()
             job_dir = response.json().get("codex_job_dir")
         except (requests.RequestException, ValueError):
@@ -1766,6 +1820,9 @@ class LedgerGUI:
 
         link = "codex://new?" + urlencode({"path": job_dir, "prompt": CODEX_HANDOFF_PROMPT})
         try:
+            if self.runtime is not None:
+                os.startfile(link)
+                return
             handler = subprocess.run(["xdg-mime", "query", "default", "x-scheme-handler/codex"],
                                      capture_output=True, text=True, timeout=3, check=True)
             if handler.stdout.strip():
@@ -1773,11 +1830,12 @@ class LedgerGUI:
                 return
         except (OSError, subprocess.SubprocessError):
             pass
+        remote_note = ("" if self.runtime is not None else
+                       "If Codex is on another computer, use its SSH connection to this appliance.\n\n")
         messagebox.showinfo(
             "Codex desktop",
             f"In Codex, open this folder as a project:\n{job_dir}\n\n"
-            "If Codex is on another computer, use its SSH connection to this appliance.\n\n"
-            "Select GPT-6.1 Sol or GPT-6 Astra and send:\n" + CODEX_HANDOFF_PROMPT,
+            f"{remote_note}Select GPT-6.1 Sol or GPT-6 Astra and send:\n" + CODEX_HANDOFF_PROMPT,
             parent=window,
         )
 
@@ -1786,7 +1844,7 @@ class LedgerGUI:
         place -- the all-users AI MODEL button (open_model_picker) -- so this
         window no longer changes the model."""
         adv_win = ctk.CTkToplevel(self.root)
-        adv_win.title("JUST DON'T!")
+        adv_win.title("Reset provider setup" if self.runtime is not None else "JUST DON'T!")
         adv_win.geometry("600x340")
         adv_win.minsize(560, 300)
         adv_win.transient(self.root)
@@ -1797,7 +1855,9 @@ class LedgerGUI:
 
         warn_label = ctk.CTkLabel(
             warn_frame,
-            text=("WARNING!\n\nFactory reset removes Ledger's provider settings and keys\n"
+            text=("Reset removes Ledger's provider settings and keys for this Windows account.\n"
+                  "Your grading workspace stays in place." if self.runtime is not None else
+                  "WARNING!\n\nFactory reset removes Ledger's provider settings and keys\n"
                   "and re-locks the appliance. Azure CLI sign-in is separate.\n"
                   "Get out of here unless you know what you're doing!"),
             font=ctk.CTkFont(family="Ubuntu", size=16, weight="bold"),
@@ -1807,14 +1867,16 @@ class LedgerGUI:
 
         # --- ADMIN-ONLY FACTORY RESET ---
         try:
-            current_user = getpass.getuser()
-            sudo_group = grp.getgrnam('sudo').gr_mem
+            can_reset = self.runtime is not None
+            if not can_reset:
+                current_user = getpass.getuser()
+                sudo_group = grp.getgrnam('sudo').gr_mem
+                can_reset = current_user == 'paragon' or current_user in sudo_group
 
-            # Checks if the user is the master 'paragon' account or has sudo privileges
-            if current_user == 'paragon' or current_user in sudo_group:
+            if can_reset:
                 reset_btn = ctk.CTkButton(
                     adv_win,
-                    text="FACTORY RESET APPLIANCE",
+                    text="Reset provider setup" if self.runtime is not None else "FACTORY RESET APPLIANCE",
                     font=self.main_font,
                     fg_color="#8B0000",  # Dark Red
                     hover_color="#A52A2A",
@@ -1828,10 +1890,15 @@ class LedgerGUI:
 
     def execute_factory_reset(self, window):
         """Wipes the secure .env and database liability signatures to lock the system."""
-        self.log_message("Requesting administrative privileges for Factory Reset...")
+        if self.runtime is not None and (self.is_running or self._batch_pending):
+            messagebox.showinfo("Ledger", "Stop the current batch before resetting provider setup.", parent=window)
+            return
         try:
-            # 1. Purge the API keys securely via pkexec
-            subprocess.run(['pkexec', 'sh', '-c', 'set -e; rm -f /etc/paragon/.env /etc/paragon/sa.json /etc/ledger-initialized; set +e; systemctl stop ledger-daemon.service; exit 0'], check=True)
+            if self.runtime is not None:
+                self.runtime.reset_setup()
+            else:
+                self.log_message("Requesting administrative privileges for Factory Reset...")
+                subprocess.run(['pkexec', 'sh', '-c', 'set -e; rm -f /etc/paragon/.env /etc/paragon/sa.json /etc/ledger-initialized; set +e; systemctl stop ledger-daemon.service; exit 0'], check=True)
             
             # 2. Scrub the signature from the SQLite database
             conn = sqlite3.connect(DB_PATH)
@@ -1840,7 +1907,8 @@ class LedgerGUI:
             conn.commit()
             conn.close()
             
-            self.log_message("-> APPLIANCE RESET SUCCESSFUL. System locked.")
+            self.log_message("Provider setup reset." if self.runtime is not None else
+                             "-> APPLIANCE RESET SUCCESSFUL. System locked.")
             window.destroy()
             
             # 3. Re-evaluate first-run state THROUGH the tier gate (an initializer
@@ -1851,6 +1919,9 @@ class LedgerGUI:
             self.log_message("[!] ERROR: Administrator authorization failed. Reset aborted.")
         except Exception as e:
             self.log_message(f"[!] Database Write Error (Factory Reset): {e}")
+            if self.runtime is not None:
+                messagebox.showerror("Ledger setup", str(e), parent=window)
+
     def open_keys_and_accounts(self):
         """Launch the tier-aware Keys & Accounts GUI (ledger-keymgr-gui.py).
 
@@ -3234,6 +3305,15 @@ class LedgerGUI:
             self.log_message("[!] Error: You must load a Master PDF before running Ledger.")
             return
 
+        if self.runtime is not None:
+            try:
+                configure_tesseract()
+                self._xelatex = xelatex_command()
+                self.runtime.start()
+            except (OSError, RuntimeError) as exc:
+                messagebox.showerror("Ledger could not start grading", str(exc), parent=self.root)
+                return
+
         self.global_max_score = int(max_score_str)
 
         # [PATCH:essay-mode] Read the pipeline mode ONCE per run so a mid-batch
@@ -3358,7 +3438,7 @@ class LedgerGUI:
             
             if not payload["model_name"].lower().startswith(DESKTOP_MODEL_PREFIXES):
                 time.sleep(10) # Network buffer before uploading massive cache payload
-            response = requests.post("http://127.0.0.1:5000/api/cache/build", json=payload, timeout=120)
+            response = self._daemon_request("POST", "/api/cache/build", json=payload, timeout=120)
             self._raise_daemon_error(response)
             
             self.cached_silo2_content = True # Just a local flag now
@@ -3372,7 +3452,7 @@ class LedgerGUI:
                 self.s2ctx_master_files = []
             else:
                 try:
-                    _health = requests.get("http://127.0.0.1:5000/", timeout=10).json()
+                    _health = self._daemon_request("GET", "/", timeout=10).json()
                 except Exception:
                     _health = {}
                 if _health.get("per_chunk_context"):
@@ -3387,7 +3467,7 @@ class LedgerGUI:
 
     def delete_cache(self):
         try:
-            requests.post("http://127.0.0.1:5000/api/cache/delete", timeout=15)
+            self._daemon_request("POST", "/api/cache/delete", timeout=15)
             self.cached_silo2_content = False
             self.log_message("-> Google context cache successfully purged.")
         except Exception as e:
@@ -3401,7 +3481,7 @@ class LedgerGUI:
         snippets = []
         try:
             # 1. Read image in grayscale
-            img = cv2.imread(full_page_img_path)
+            img = _read_cv_image(full_page_img_path)
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             
             # 2. Adaptive Thresholding: Dynamically handles scanner shadows/gradients
@@ -3456,7 +3536,7 @@ class LedgerGUI:
             for x, y, w, h in valid_boxes:
                 cropped = img[y:y+h, x:x+w]
                 snippet_path = os.path.join(TEMP_DIR, f"snippet_p{page_num}_b{box_count}.png")
-                cv2.imwrite(snippet_path, cropped)
+                _write_cv_image(snippet_path, cropped)
                 snippets.append(snippet_path)
                 box_count += 1
             
@@ -3648,7 +3728,7 @@ class LedgerGUI:
         try:
             frac = os.environ.get("LEDGER_ESSAY_TAG_REGION", "0.00,0.05,0.30,0.22")
             fx, fy, fw, fh = [float(v) for v in frac.split(",")]
-            img = cv2.imread(page_img_path)
+            img = _read_cv_image(page_img_path)
             H, W = img.shape[:2]
             x0, y0 = int(W * fx), int(H * fy)
             x1, y1 = min(W, x0 + int(W * fw)), min(H, y0 + int(H * fh))
@@ -3722,7 +3802,7 @@ class LedgerGUI:
                                          cv2.BORDER_CONSTANT, value=255)
             if os.environ.get("LEDGER_ESSAY_TAG_DEBUG", "0") == "1":
                 dbg = os.path.join(TEMP_DIR, f"tagdebug_{os.path.basename(page_img_path)}")
-                cv2.imwrite(dbg, roi_inv)
+                _write_cv_image(dbg, roi_inv)
             text = pytesseract.image_to_string(
                 roi_inv, config='--psm 8 -c tessedit_char_whitelist=0123456789').strip()
             return int(text) if text else None
@@ -3848,7 +3928,7 @@ class LedgerGUI:
         # the Algebra 1 EOC sample; two silent misreads, 200 and 307).
         page_num = 999
         try:
-            footer_img = cv2.imread(footer_path)
+            footer_img = _read_cv_image(footer_path)
             gray_f = cv2.cvtColor(footer_img, cv2.COLOR_BGR2GRAY)
             _, thresh_f = cv2.threshold(gray_f, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
             contours, _ = cv2.findContours(thresh_f, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -3901,7 +3981,7 @@ class LedgerGUI:
                 }
                 
                 timeout = DESKTOP_OCR_TIMEOUT if use_desktop else 60
-                response = requests.post("http://127.0.0.1:5000/api/silo1", json=payload, timeout=timeout)
+                response = self._daemon_request("POST", "/api/silo1", json=payload, timeout=timeout)
                 self._raise_daemon_error(response)
                 data = response.json()
                 
@@ -4115,7 +4195,7 @@ class LedgerGUI:
                 read_timeout = float(os.environ.get("LEDGER_SILO2_CLIENT_TIMEOUT_S", "330"))
                 if use_copilot:
                     read_timeout = max(read_timeout, DESKTOP_OCR_TIMEOUT)
-                response = requests.post("http://127.0.0.1:5000/api/silo2", json=payload, timeout=(10, read_timeout))
+                response = self._daemon_request("POST", "/api/silo2", json=payload, timeout=(10, read_timeout))
                 if not self.is_running:
                     return None
                 self._raise_daemon_error(response)
@@ -4229,12 +4309,17 @@ class LedgerGUI:
         student_name = f"{student_data['first']} {student_data['last']}"
         safe_tex_name = student_name.replace('&', '\\&').replace('%', '\\%').replace('#', '\\#').replace('_', '\\_')
         
-        tex_filename = f"{b_id}-{student_data['last']}-{student_data['first']}-Conspectus.tex"
+        last_name, first_name = student_data["last"], student_data["first"]
+        if self.runtime is not None:
+            last_name = _windows_report_name(last_name)
+            first_name = _windows_report_name(first_name)
+        tex_filename = f"{b_id}-{last_name}-{first_name}-Conspectus.tex"
         tex_path = os.path.join(output_dir, tex_filename)
         
         tex_content = f"\\documentclass[12pt]{{article}}\n"
         tex_content += f"\\usepackage{{fontspec}}\n"
-        tex_content += f"\\setmainfont{{Liberation Serif}}\n"
+        main_font = "Times New Roman" if self.runtime is not None else "Liberation Serif"
+        tex_content += f"\\setmainfont{{{main_font}}}\n"
         tex_content += f"\\usepackage[margin=1in]{{geometry}}\n"
         tex_content += f"\\usepackage{{graphicx}}\n"
         tex_content += f"\\usepackage{{eso-pic}}\n"
@@ -4284,7 +4369,8 @@ class LedgerGUI:
         tex_content += f"\\vfill\n"
         tex_content += f"\\centering\n"
         if os.path.exists(WATERMARK_FILE):  # [PATCH:wm-guard] missing watermark must not error every page
-            tex_content += f"\\includegraphics[width=0.5\\paperwidth,keepaspectratio]{{{WATERMARK_FILE}}}%\n"
+            watermark_path = WATERMARK_FILE.replace("\\", "/") if self.runtime is not None else WATERMARK_FILE
+            tex_content += f"\\includegraphics[width=0.5\\paperwidth,keepaspectratio]{{{watermark_path}}}%\n"
         tex_content += f"\\vfill\n"
         tex_content += f"}}}}}}\n\n"
 
@@ -4401,6 +4487,8 @@ class LedgerGUI:
         tex_content += "\\clearpage\n\n"
         
         for img in original_images:
+            if self.runtime is not None:
+                img = img.replace("\\", "/")
             tex_content += f"\\AddToShipoutPictureBG*{{%\n"
             tex_content += f"  \\AtPageLowerLeft{{%\n"
             tex_content += f"    \\includegraphics[width=\\paperwidth,height=\\paperheight]{{{img}}}%\n"
@@ -4420,12 +4508,18 @@ class LedgerGUI:
             
         self.log_message(f"--> Compiling Conspectus PDF for {student_name} (ID: {b_id})...")
         try:
+            command = [self._xelatex, '-interaction=nonstopmode']
+            if self.runtime is not None:
+                command.append('-no-shell-escape')
             result = subprocess.run(
-                ['xelatex', '-interaction=nonstopmode', tex_filename], 
-                cwd=output_dir, 
-                capture_output=True, 
+                [*command, tex_filename],
+                cwd=output_dir,
+                capture_output=True,
                 text=True,
-                timeout=900
+                encoding="utf-8" if self.runtime is not None else None,
+                errors="replace" if self.runtime is not None else None,
+                timeout=900,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if self.runtime is not None else 0,
             )
 
             # [PATCH:overflow-detector] Warn-only overflow scan of the compile
@@ -4563,17 +4657,17 @@ class LedgerGUI:
                         
                     # THE FIX: Silo 1 now runs on every single page to catch out-of-order scans!
                     # 1. Dynamic Extraction of ID and Footer using locked Database Coordinates
-                    img_for_crop = cv2.imread(temp_full_img_path)
+                    img_for_crop = _read_cv_image(temp_full_img_path)
                     
                     id_coords = self.get_crop_coordinates('crop_id')
                     id_crop = img_for_crop[id_coords[1] : id_coords[1]+id_coords[3], id_coords[0] : id_coords[0]+id_coords[2]]
                     temp_id_path = os.path.join(TEMP_DIR, f"{safe_pdf_name}-temp-id-{page_num + 1}.png")
-                    cv2.imwrite(temp_id_path, id_crop)
+                    _write_cv_image(temp_id_path, id_crop)
 
                     f_coords = self.get_crop_coordinates('crop_footer')
                     footer_crop = img_for_crop[f_coords[1] : f_coords[1]+f_coords[3], f_coords[0] : f_coords[0]+f_coords[2]]
                     temp_footer_path = os.path.join(TEMP_DIR, f"{safe_pdf_name}-temp-footer-{page_num + 1}.png")
-                    cv2.imwrite(temp_footer_path, footer_crop)
+                    _write_cv_image(temp_footer_path, footer_crop)
 
                     # 2. Extract data (local OCR for the footer, provider OCR for the ID)
                     if not use_desktop:
@@ -4889,10 +4983,32 @@ class LedgerGUI:
             self.model_btn.configure(state="normal")
         self.log_message("=== BATCH PROCESSING CONCLUDED. ===")
 
-if __name__ == "__main__":
+def _run_windows():
+    root = ctk.CTk()
+    root.withdraw()
+    try:
+        with WindowsRuntime() as runtime:
+            startup_error = None
+            if runtime.init_path.is_file():
+                try:
+                    runtime.start()
+                except (OSError, RuntimeError) as exc:
+                    startup_error = str(exc)
+            LedgerGUI(root, runtime=runtime)
+            root.deiconify()
+            if startup_error is not None:
+                messagebox.showerror("Ledger daemon", startup_error, parent=root)
+            root.mainloop()
+    except (OSError, RuntimeError) as exc:
+        messagebox.showerror("Ledger", str(exc), parent=root)
+        root.destroy()
+
+
+if __name__ == "__main__" and os.name == "nt":
+    _run_windows()
+elif __name__ == "__main__":
     import socket
     import sys
-    import subprocess
     
     # --- PARAGON SINGLE INSTANCE LOCK ---
     try:
