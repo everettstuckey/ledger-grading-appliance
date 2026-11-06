@@ -17,6 +17,7 @@ import csv
 import sqlite3
 import subprocess
 import shutil
+import tempfile
 import re
 import base64
 import io
@@ -259,7 +260,10 @@ AI_STUDIO_PREFIXES = ("AQ.", "AIza")
 ANTHROPIC_PREFIX = "sk-ant-"
 DEFAULT_GUI_MODEL = "gemini-3.5-pro-preview"
 CODEX_HANDOFF_PROMPT = "$ledger-grading Process Ledger jobs in this workspace while I run an evaluation batch."
-CODEX_HANDOFF_OCR_TIMEOUT = 330
+DESKTOP_OCR_TIMEOUT = 330
+DESKTOP_MODEL_PREFIXES = ("codex/", "copilot/")
+COPILOT_BRIDGE_URL = "http://127.0.0.1:8790"
+COPILOT_BRIDGE_TOKEN = re.compile(r"[A-Za-z0-9_-]{32,128}")
 AZURE_ENDPOINT = re.compile(
     r"https://[a-z0-9][a-z0-9-]*\.(?:openai\.azure\.com|services\.ai\.azure\.com)/?",
     re.IGNORECASE | re.ASCII,
@@ -278,7 +282,7 @@ WIZARD_SCREEN_ALLOWANCE = 100       # same screen clamp the dashboard uses
 WIZARD_LEVEL_COLORS = {"block": "#c0392b", "warn": "#e67e22", "ready": "#1e8449", "idle": "#7f8c8d"}
 WIZARD_DEFAULT_RULE = (
     "Provide GOOGLE (AI Studio API key, or Project ID + service-account JSON under "
-    "Advanced), ANTHROPIC (API key), Azure OpenAI (resource URL and Entra tenant ID), or Codex desktop. "
+    "Advanced), ANTHROPIC (API key), Azure OpenAI, Codex desktop, or a Copilot bridge token. "
     "At least one complete provider is required."
 )
 WIZARD_BILLING_REQUIRED = "Billing confirmation required for Google AI Studio keys."
@@ -302,7 +306,7 @@ WIZARD_LEGAL_TEXT = (
     "law, and any data-privacy agreement my institution requires.\n\n"
 
     "    2. DATA SENT TO THIRD PARTIES: This software sends images to the AI "
-    "providers I configure (Google, Anthropic, Azure OpenAI, or Codex): the blank master pages, "
+    "providers I configure (Google, Anthropic, Azure OpenAI, Codex, or Microsoft Copilot): the blank master pages, "
     "a title crop, an ID crop from every page, and either cropped answer boxes "
     "(WORKSHEET mode) or WHOLE PAGES (ESSAY mode). What a provider does with "
     "those images is governed by its terms, which I have read and accept.\n\n"
@@ -358,12 +362,12 @@ BILLING_DISCLOSURE_TEXT = (
 
 
 def wizard_provider_state(ai_key, gcp_id, has_creds, anth_key, billing_confirmed,
-                          azure_endpoint="", azure_tenant="", codex_enabled=False):
+                          azure_endpoint="", azure_tenant="", codex_enabled=False, copilot_token=""):
     """Pure provider-completeness rule for the SYSTEM INITIALIZATION wizard.
 
     Google is complete as EITHER an AI Studio key OR (Project ID + service-account
     JSON), Anthropic as an sk-ant- key, Azure as an endpoint plus tenant ID,
-    and Codex as an enabled desktop handoff.
+    Codex as an enabled desktop handoff, and Copilot with a bridge token.
     At least one complete provider is required.
     Both Google forms at once -> block (one Google route per box). A half-entered
     Vertex pair -> block. A malformed Anthropic key -> block. An AI Studio key
@@ -378,6 +382,7 @@ def wizard_provider_state(ai_key, gcp_id, has_creds, anth_key, billing_confirmed
     anth_key = (anth_key or "").strip()
     azure_endpoint = (azure_endpoint or "").strip()
     azure_tenant = (azure_tenant or "").strip()
+    copilot_token = (copilot_token or "").strip()
     has_creds = bool(has_creds)
 
     ai_present = bool(ai_key)
@@ -387,6 +392,7 @@ def wizard_provider_state(ai_key, gcp_id, has_creds, anth_key, billing_confirmed
     anth_complete = anth_key.startswith(ANTHROPIC_PREFIX)
     anth_malformed = bool(anth_key) and not anth_complete
     azure_complete = bool(AZURE_ENDPOINT.fullmatch(azure_endpoint) and AZURE_TENANT.fullmatch(azure_tenant))
+    copilot_complete = bool(COPILOT_BRIDGE_TOKEN.fullmatch(copilot_token))
 
     warnings = []
     if ai_present and ai_key.startswith(ANTHROPIC_PREFIX):
@@ -398,7 +404,8 @@ def wizard_provider_state(ai_key, gcp_id, has_creds, anth_key, billing_confirmed
     def _out(ok, level, message, use_ai=False, use_vertex=False, use_anth=False):
         return {"ok": ok, "level": level, "message": message, "warnings": warnings,
                 "use_ai_studio": use_ai, "use_vertex": use_vertex, "use_anthropic": use_anth,
-                "use_azure": ok and azure_complete, "use_codex": ok and codex_enabled}
+                "use_azure": ok and azure_complete, "use_codex": ok and codex_enabled,
+                "use_copilot": ok and copilot_complete}
 
     if both_google:
         return _out(False, "block",
@@ -422,8 +429,11 @@ def wizard_provider_state(ai_key, gcp_id, has_creds, anth_key, billing_confirmed
     if (azure_endpoint or azure_tenant) and not azure_complete:
         return _out(False, "block", "Enter both the Azure OpenAI HTTPS resource URL and the Entra tenant GUID.")
 
+    if copilot_token and not copilot_complete:
+        return _out(False, "block", "Use the 32 to 128 character token generated for the Copilot bridge.")
+
     google_complete = ai_present or vertex_complete
-    if not (google_complete or anth_complete or azure_complete or codex_enabled):
+    if not (google_complete or anth_complete or azure_complete or codex_enabled or copilot_complete):
         return _out(False, "idle", WIZARD_DEFAULT_RULE)
 
     names = []
@@ -437,6 +447,8 @@ def wizard_provider_state(ai_key, gcp_id, has_creds, anth_key, billing_confirmed
         names.append("Azure OpenAI (Microsoft Entra)")
     if codex_enabled:
         names.append("Codex desktop")
+    if copilot_complete:
+        names.append("Copilot desktop")
     ready = ("Providers ready: " if len(names) > 1 else "Provider ready: ") + " + ".join(names) + "."
     if warnings:
         return _out(True, "warn", ready + " WARNING: " + warnings[0],
@@ -444,7 +456,7 @@ def wizard_provider_state(ai_key, gcp_id, has_creds, anth_key, billing_confirmed
     return _out(True, "ready", ready, ai_present, vertex_complete, anth_complete)
 # --- end [PATCH:wizard-devapi] ----------------------------------------------
 
-class CodexHandoffError(RuntimeError):
+class DesktopOcrError(RuntimeError):
     """A desktop OCR failure that leaves the batch pending."""
 
 
@@ -465,6 +477,8 @@ class LedgerGUI:
         ctk.set_default_color_theme("blue")
         
         self.is_running = False
+        self._batch_pending = False
+        self._batch_model = None
         self.calibrated_this_session = False   # [PATCH:calib-session-skip] set by SAVE in either studio
         self.master_pdf_path = None
         self.cached_silo2_content = None
@@ -760,12 +774,12 @@ class LedgerGUI:
                 "image_b64": base64_img
             }
             
-            use_codex = payload["model_name"].lower().startswith("codex/")
-            if not use_codex:
+            use_desktop = payload["model_name"].lower().startswith(DESKTOP_MODEL_PREFIXES)
+            if not use_desktop:
                 time.sleep(10) # Network buffer before establishing Silo 1 session
-            timeout = CODEX_HANDOFF_OCR_TIMEOUT if use_codex else 60
+            timeout = DESKTOP_OCR_TIMEOUT if use_desktop else 60
             response = requests.post("http://127.0.0.1:5000/api/silo1", json=payload, timeout=timeout)
-            if use_codex and not self.is_running:
+            if not self.is_running:
                 return
             
             if response.status_code != 200:
@@ -774,11 +788,14 @@ class LedgerGUI:
             data = response.json()
             
             if data.get("status") == "success":
-                raw = data["text"].strip().replace('```json', '').replace('```', '').strip()
-                title_data = json.loads(raw) if use_codex else json_repair.loads(raw)
-                if use_codex and (not isinstance(title_data, dict) or not isinstance(title_data.get("assignment_title"), str)
+                if use_desktop:
+                    title_data = json.loads(data['text'])
+                else:
+                    raw = data["text"].strip().replace('```json', '').replace('```', '').strip()
+                    title_data = json_repair.loads(raw)
+                if use_desktop and (not isinstance(title_data, dict) or not isinstance(title_data.get("assignment_title"), str)
                                   or not title_data["assignment_title"].strip()):
-                    raise CodexHandoffError("Codex returned an invalid assignment title.")
+                    raise DesktopOcrError("The desktop provider returned an invalid assignment title.")
             else:
                 raise Exception(data.get("message", "Daemon returned an error."))
 
@@ -788,14 +805,15 @@ class LedgerGUI:
             
             self.log_message(f"-> Official Title Locked: {self.master_display_title}")
             
-            # Register the assignment and officially launch the main batch thread
+            # Register the assignment before processing the batch.
             self.register_assignment_in_db(self.master_group_key, self.master_display_title, self.global_max_score)
-            threading.Thread(target=self.process_pipeline, daemon=True).start()
 
         except Exception as e:
             self.log_message(f"[!] Critical Error extracting Title/Igniting Engine: {e}")
-            self.shut_down()
-        
+            return
+
+        self.process_pipeline()
+
     def initialize_database(self):
         """Ensures the core database tables exist for a fresh Paragon unit."""
         try:
@@ -1029,6 +1047,10 @@ class LedgerGUI:
         ctk.CTkCheckBox(body, text="Use Codex desktop for evaluation", variable=codex_var,
                         font=self.main_font).pack(pady=(4, 2))
         ctk.CTkLabel(body, text="Open the handoff folder in Codex and use synthetic work for evaluation.",
+                     font=note_font).pack(pady=(0, 8))
+
+        _, copilot_token_var = _masked_row(body, "COPILOT BRIDGE TOKEN:")
+        ctk.CTkLabel(body, text="For Copilot, start the Windows bridge and SSH tunnel before grading.",
                      font=note_font).pack(pady=(0, 8))
 
         # One-line provider rule so the operator knows what unlocks the button.
@@ -1299,7 +1321,8 @@ class LedgerGUI:
                 disc["confirmed_key"] = None
             st = wizard_provider_state(ai_key, gcp_var.get(), creds_state['path'] is not None,
                                         anth_var.get(), billing_var.get() == "on",
-                                        azure_endpoint_var.get(), azure_tenant_var.get(), codex_var.get())
+                                        azure_endpoint_var.get(), azure_tenant_var.get(),
+                                        codex_var.get(), copilot_token_var.get())
             disclosure_btn.configure(state="normal" if ai_key else "disabled")
             provider_rule.configure(text=st["message"], text_color=WIZARD_LEVEL_COLORS[st["level"]])
             has_rep = len(rep_var.get().strip()) > 0
@@ -1311,7 +1334,7 @@ class LedgerGUI:
 
         ai_var.trace_add("write", _on_ai_change)
         ai_entry.bind("<FocusOut>", _on_ai_focus_out)
-        for _v in (anth_var, gcp_var, rep_var, azure_endpoint_var, azure_tenant_var, codex_var):
+        for _v in (anth_var, gcp_var, rep_var, azure_endpoint_var, azure_tenant_var, codex_var, copilot_token_var):
             _v.trace_add("write", validate_inputs)
         liability_cb.configure(command=validate_inputs)
 
@@ -1325,27 +1348,29 @@ class LedgerGUI:
             anth_key = anth_var.get().strip()
             azure_endpoint = azure_endpoint_var.get().strip().rstrip("/")
             azure_tenant = azure_tenant_var.get().strip()
+            copilot_token = copilot_token_var.get().strip()
             rep_name = rep_var.get().strip()
             timestamp = datetime.datetime.now().isoformat()
 
             st = wizard_provider_state(ai_key, new_key, creds_state['path'] is not None,
                                         anth_key, billing_var.get() == "on", azure_endpoint, azure_tenant,
-                                        codex_var.get())
+                                        codex_var.get(), copilot_token)
             use_ai = st["use_ai_studio"]
             use_vertex = st["use_vertex"]
             use_anthropic = st["use_anthropic"]
             use_azure = st["use_azure"]
             use_codex = st["use_codex"]
+            use_copilot = st["use_copilot"]
 
             if st["ok"] and rep_name:
                 # 1. Stage .env, the service-account key (Vertex route only),
                 #    and the init marker in the per-user temp dir. Paths are
                 #    handled in Python so spaces / odd characters in the picked
                 #    file are safe. No credential value is ever logged.
-                temp_env = os.path.join(TEMP_DIR, ".env.temp")
                 temp_sa = os.path.join(TEMP_DIR, "sa.json.temp")
                 temp_marker = os.path.join(TEMP_DIR, "initialized.temp")
-                with open(temp_env, "w") as f:
+                with tempfile.NamedTemporaryFile(mode="w", dir=TEMP_DIR, prefix=".env-", delete=False) as f:
+                    temp_env = f.name
                     if use_ai:
                         # Daemon v2.9 builds genai.Client(api_key=...) from this
                         # (Gemini Developer API). Same custody as the other keys:
@@ -1364,10 +1389,14 @@ class LedgerGUI:
                         f.write(f'LEDGER_AZURE_TENANT_ID="{azure_tenant}"\n')
                     if use_codex:
                         f.write('LEDGER_CODEX_ENABLED="true"\n')
+                    if use_copilot:
+                        f.write(f'LEDGER_COPILOT_BRIDGE_URL="{COPILOT_BRIDGE_URL}"\n')
+                        f.write(f'LEDGER_COPILOT_BRIDGE_TOKEN="{copilot_token}"\n')
                 if use_vertex:
                     try:
                         shutil.copy(creds_state['path'], temp_sa)
                     except Exception as e:
+                        os.unlink(temp_env)
                         self.log_message(f"[!] ERROR: Could not read the credentials file: {e}")
                         return
                 with open(temp_marker, "w") as f:
@@ -1412,6 +1441,9 @@ class LedgerGUI:
                     # Re-engage the lock if the password prompt fails or is canceled
                     setup_win.grab_set()
                     return
+                finally:
+                    if os.path.exists(temp_env):
+                        os.unlink(temp_env)
 
                 # 3. Record the authorization in the SQLite database. The
                 #    liability_institution key is kept for schema compatibility
@@ -1437,7 +1469,7 @@ class LedgerGUI:
                 providers = " + ".join(
                     p for p, on in (("GOOGLE (AI Studio)", use_ai), ("GOOGLE (Vertex)", use_vertex),
                                     ("ANTHROPIC", use_anthropic), ("Azure OpenAI", use_azure),
-                                    ("Codex desktop", use_codex)) if on
+                                    ("Codex desktop", use_codex), ("Copilot desktop", use_copilot)) if on
                 )
                 if use_ai:
                     self.log_message("Google (AI Studio): billing confirmed by operator")
@@ -1609,7 +1641,9 @@ class LedgerGUI:
             self.log_message(f"[!] Database Update Error (Settings): {e}")
 
     def get_silo2_model(self):
-        """Fetches the current active model from the database."""
+        """Return the batch model, or fetch the user preference when idle."""
+        if self._batch_model is not None:
+            return self._batch_model
         try:
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
@@ -1624,7 +1658,8 @@ class LedgerGUI:
             health = requests.get("http://127.0.0.1:5000/", timeout=1)
             health.raise_for_status()
             providers = health.json()
-            return (providers.get("codex_default_model") or providers.get("azure_openai_default_model")
+            return (providers.get("codex_default_model") or providers.get("copilot_default_model")
+                    or providers.get("azure_openai_default_model")
                     or DEFAULT_GUI_MODEL)
         except (requests.RequestException, ValueError):
             return DEFAULT_GUI_MODEL
@@ -1678,6 +1713,7 @@ class LedgerGUI:
             win,
             text=("Enter the exact model ID.\n"
                   "Codex desktop: codex/gpt-6.1-sol or codex/gpt-6-astra\n"
+                  "Copilot desktop: copilot/gpt-6.1-sol or copilot/gpt-6-astra\n"
                   "Azure: gpt-6.1-sol or gpt-6-astra\n"
                   "Google: gemini-4-argon  |  Anthropic: claude-opus-4-8"),
             font=self.main_font, justify="center"
@@ -2212,7 +2248,7 @@ class LedgerGUI:
                 if is_intercept:
                     self.log_message("Calibration settings saved. Starting Ledger engine...")
                     # ARCHITECTURAL FIX: Push the blocking API extraction into a background thread
-                    threading.Thread(target=self.run_batch_extraction, args=(target_pdf,), daemon=True).start()
+                    self._start_batch_worker(target_pdf)
                 
         save_btn = ctk.CTkButton(calib_win, text="SAVE & PROCEED" if is_intercept else "SAVE", font=self.header_font, height=50, fg_color="#1e8449", hover_color="#27ae60", command=save_and_proceed)
         save_btn.pack(pady=(10, 20))
@@ -3223,9 +3259,11 @@ class LedgerGUI:
             self.log_message("Essay grouping: single-call mode -- each student's "
                              "pages travel together in one call (corner-tag OCR skipped).")
 
-        if not self.is_running:
+        if not self.is_running and not self._batch_pending:
+            self._batch_model = self.get_silo2_model()
             self.is_running = True
             self.run_btn.configure(state="disabled")
+            self.model_btn.configure(state="disabled")
             self.max_score_entry.configure(state="disabled")
             self.mode_selector.configure(state="disabled")
             self.master_btn.configure(state="disabled")
@@ -3239,12 +3277,31 @@ class LedgerGUI:
             if self.calibrated_this_session and scan_files:
                 target_pdf = os.path.join(UNEVALUATED_DIR, scan_files[0])
                 self.log_message("Calibration already saved this session. Starting Ledger engine...")
-                threading.Thread(target=self.run_batch_extraction, args=(target_pdf,), daemon=True).start()
+                self._start_batch_worker(target_pdf)
             else:
                 self.open_calibration_tool(is_intercept=True)
 
+    def _start_batch_worker(self, target_pdf):
+        if not self.is_running or self._batch_pending:
+            return
+        self._batch_pending = True
+        threading.Thread(target=self._run_batch_worker, args=(target_pdf,), daemon=True).start()
+
+    def _run_batch_worker(self, target_pdf):
+        try:
+            self.run_batch_extraction(target_pdf)
+        except Exception as exc:
+            self.log_message(f"[!] Batch processing stopped. {exc}")
+        finally:
+            self.finish_processing()
+
     def shut_down(self):
         self.is_running = False
+        if self._batch_pending:
+            self.log_message("Stop requested. Waiting for the current operation to finish.")
+            return
+        self._batch_model = None
+        self.model_btn.configure(state="normal")
         self.update_indicator("idle")
         self.run_btn.configure(state="normal")
         self.max_score_entry.configure(state="normal")
@@ -3299,7 +3356,7 @@ class LedgerGUI:
                 "images_b64": master_parts_b64
             }
             
-            if not payload["model_name"].lower().startswith("codex/"):
+            if not payload["model_name"].lower().startswith(DESKTOP_MODEL_PREFIXES):
                 time.sleep(10) # Network buffer before uploading massive cache payload
             response = requests.post("http://127.0.0.1:5000/api/cache/build", json=payload, timeout=120)
             self._raise_daemon_error(response)
@@ -3815,7 +3872,7 @@ class LedgerGUI:
         # --- PROVIDER OCR (BARTONIAN ID ONLY) ---
         delay = 15
         model_name = self.get_silo2_model()
-        use_codex = model_name.lower().startswith("codex/")
+        use_desktop = model_name.lower().startswith(DESKTOP_MODEL_PREFIXES)
         while self.is_running:
             try:
                 # The image is already perfectly cropped by the dynamic coordinates
@@ -3843,24 +3900,27 @@ class LedgerGUI:
                     "image_b64": base64_header
                 }
                 
-                timeout = CODEX_HANDOFF_OCR_TIMEOUT if use_codex else 60
+                timeout = DESKTOP_OCR_TIMEOUT if use_desktop else 60
                 response = requests.post("http://127.0.0.1:5000/api/silo1", json=payload, timeout=timeout)
                 self._raise_daemon_error(response)
                 data = response.json()
                 
                 if data.get("status") == "success":
-                    raw = data["text"].strip().replace('```json', '').replace('```', '').strip()
-                    silo_data = json.loads(raw) if use_codex else json_repair.loads(raw)
-                    if use_codex and (not isinstance(silo_data, dict) or type(silo_data.get("bartonian_id")) is not int):
-                        raise CodexHandoffError("Codex returned an invalid ID transcription.")
+                    if use_desktop:
+                        silo_data = json.loads(data['text'])
+                    else:
+                        raw = data["text"].strip().replace('```json', '').replace('```', '').strip()
+                        silo_data = json_repair.loads(raw)
+                    if use_desktop and (not isinstance(silo_data, dict) or type(silo_data.get("bartonian_id")) is not int):
+                        raise DesktopOcrError("The desktop provider returned an invalid ID transcription.")
                     silo_data["page_num"] = page_num
                     return silo_data
                 else:
                     raise Exception(data.get("message", "Daemon returned an error."))
                 
             except Exception as e:
-                if use_codex:
-                    raise CodexHandoffError(str(e)) from None
+                if use_desktop:
+                    raise DesktopOcrError(str(e)) from None
                 logging.info(f"[!] Silo 1 Error. Retrying in {delay} seconds... Details: {e}")
                 friendly_err = self._translate_api_error(e)
                 self.root.after(0, self._append_to_gui, f"Silo 1 Status: {friendly_err} (Retrying in {delay}s)")
@@ -3945,8 +4005,8 @@ class LedgerGUI:
         re-run recovers). A small inter-chunk pace avoids self-inflicted 429s."""
         if not chunk_paths:
             return []
-        use_codex = self.get_silo2_model().lower().startswith("codex/")
-        pace = 0 if use_codex else float(os.environ.get("LEDGER_SILO2_CHUNK_PACING_S", "60"))
+        use_desktop = self.get_silo2_model().lower().startswith(DESKTOP_MODEL_PREFIXES)
+        pace = 0 if use_desktop else float(os.environ.get("LEDGER_SILO2_CHUNK_PACING_S", "60"))
         merged = []
         total = len(chunk_paths)
         for idx, cp in enumerate(chunk_paths, 1):
@@ -3975,7 +4035,7 @@ class LedgerGUI:
                 if not self.is_running:
                     return None
             result = self.evaluate_grid_with_silo_2(cp)
-            if result is None:
+            if result is None or not self.is_running:
                 return None  # capacity-deferred or Stop -> defer the whole student
             if isinstance(result, list):
                 merged.extend(result)
@@ -4006,7 +4066,9 @@ class LedgerGUI:
         if isinstance(grid_image_path, dict):
             master_ctx_b64 = self._s2ctx_master_images_b64(grid_image_path.get("footer_pages"))
             grid_image_path = grid_image_path["path"]
-        MAX_ATTEMPTS = int(os.environ.get("LEDGER_SILO2_MAX_ATTEMPTS", "10"))
+        use_copilot = self.get_silo2_model().lower().startswith("copilot/")
+        # A timeout can happen after the desktop app has accepted the request.
+        MAX_ATTEMPTS = 1 if use_copilot else int(os.environ.get("LEDGER_SILO2_MAX_ATTEMPTS", "10"))
         BASE_BACKOFF = 15.0   # seconds; capacity (429/503) exponential base
         MAX_BACKOFF  = 300.0  # seconds; ceiling on any single wait
         FAST_BACKOFF = 5.0    # seconds; transport/5xx is not capacity -> retry fast
@@ -4050,13 +4112,21 @@ class LedgerGUI:
                 if master_ctx_b64:
                     payload["master_images_b64"] = master_ctx_b64
 
-                response = requests.post("http://127.0.0.1:5000/api/silo2", json=payload, timeout=(10, float(os.environ.get("LEDGER_SILO2_CLIENT_TIMEOUT_S", "330"))))  # [PATCH:client-timeout-coherence] read must OUTWAIT the daemon's 300s upstream budget; 2026-07-08 journal: real Fable 5 essay grades ran 121-151s and were discarded at the old 120s hang-up
+                read_timeout = float(os.environ.get("LEDGER_SILO2_CLIENT_TIMEOUT_S", "330"))
+                if use_copilot:
+                    read_timeout = max(read_timeout, DESKTOP_OCR_TIMEOUT)
+                response = requests.post("http://127.0.0.1:5000/api/silo2", json=payload, timeout=(10, read_timeout))
+                if not self.is_running:
+                    return None
                 self._raise_daemon_error(response)
                 data = response.json()
 
                 if data.get("status") == "success":
-                    raw = data["text"].strip().replace('```json', '').replace('```', '').strip()
-                    parsed = json_repair.loads(raw)
+                    if use_copilot:
+                        parsed = json.loads(data['text'])
+                    else:
+                        raw = data["text"].strip().replace('```json', '').replace('```', '').strip()
+                        parsed = json_repair.loads(raw)
                     # [PATCH:literal-newline-normalize] Some models (first seen:
                     # claude-opus-4-8) obey the prompt's backslash-doubling rule so
                     # literally that paragraph breaks arrive as the LITERAL 4-char
@@ -4447,7 +4517,6 @@ class LedgerGUI:
         # 1. Establish Cache
         success = self.initialize_silo_2_cache(self.master_pdf_path)
         if not success:
-            self.finish_processing()
             return
 
         self.log_message("Scanning '02 Inbox Scans' folder...")
@@ -4455,13 +4524,12 @@ class LedgerGUI:
         
         if not pdf_files:
             self.log_message("No unevaluated PDFs found.")
-            self.finish_processing()
             return
             
         global_batch_data = {}
         pdf_to_period_map = {}
         tabula_records_by_eval_dir = {}
-        use_codex = self.get_silo2_model().lower().startswith("codex/")
+        use_desktop = self.get_silo2_model().lower().startswith(DESKTOP_MODEL_PREFIXES)
         
         self.log_message(f"=== INITIATING LEDGER PASS 1: EXTRACTION & CROPPING ({len(pdf_files)} Files) ===")
         
@@ -4508,12 +4576,11 @@ class LedgerGUI:
                     cv2.imwrite(temp_footer_path, footer_crop)
 
                     # 2. Extract data (local OCR for the footer, provider OCR for the ID)
-                    if not use_codex:
+                    if not use_desktop:
                         time.sleep(30) # Prevent 429 quota exhaustion
                     silo_data = self.extract_with_silo_1(temp_id_path, temp_footer_path)
-                    if use_codex and not self.is_running:
+                    if use_desktop and not self.is_running:
                         doc.close()
-                        self.finish_processing()
                         return
                     
                     if silo_data:
@@ -4591,10 +4658,9 @@ class LedgerGUI:
                 doc.close()
                 pdf_to_period_map[pdf_file] = first_period_found if first_period_found else "Unknown-Student"
                 
-            except CodexHandoffError as e:
+            except DesktopOcrError as e:
                 doc.close()
-                self.log_message(f"[!] Codex OCR stopped the batch. Scans are still in the inbox. {e}")
-                self.finish_processing()
+                self.log_message(f"[!] Desktop OCR stopped the batch. Scans are still in the inbox. {e}")
                 return
             except Exception as e:
                 self.log_message(f"[!] Error reading {pdf_file}: {e}")
@@ -4653,15 +4719,16 @@ class LedgerGUI:
                 sorted_page_paths = [page["path"] for page in student_data["full_pages"]]
                 student_info = self.roster.get(b_id, {"last": "Unknown", "first": "Student"})
 
+                full_evaluation = None
                 while attempt <= max_attempts and self.is_running:
                     self.log_message(f"Evaluating stitched grid for ID {b_id} via cached Silo 2 (Attempt {attempt} of {max_attempts})...")
                     
-                    if attempt > 1:
-                        time.sleep(15) # Increased retry pacing
-                    else:
-                        time.sleep(30) # Increased to 30s to stay under TPM limits
-                        
-                    full_evaluation = self.evaluate_chunks_with_silo_2(chunk_paths)
+                    if not use_desktop:
+                        time.sleep(15 if attempt > 1 else 30)
+                    if full_evaluation is None or not use_desktop:
+                        full_evaluation = self.evaluate_chunks_with_silo_2(chunk_paths)
+                    if not self.is_running:
+                        break
                     
                     # [PATCH:silo2-bounded-retry] None == bounded retries exhausted on Google
                     # capacity (429), OR the user pressed Stop. Defer this student: do NOT write
@@ -4784,6 +4851,10 @@ class LedgerGUI:
                 except Exception as e:
                     self.log_message(f"[!] Error writing Tabula: {e}")
 
+        # Preserve scans when the operator stops before completing the batch.
+        if not self.is_running:
+            return
+
         # Original Scan Cleanup
         self.log_message("=== PASS 2 COMPLETE. MOVING ORIGINAL SCANS ===")
         if deferred_ids:
@@ -4799,18 +4870,24 @@ class LedgerGUI:
                 except Exception as e:
                     self.log_message(f"[!] Could not move scan {pdf_file}: {e}")
 
-        self.finish_processing()
 
     def finish_processing(self):
-        self.update_indicator("idle")
-        self.run_btn.configure(state="normal")
-        self.max_score_entry.configure(state="normal")
-        self.mode_selector.configure(state="normal")   # [PATCH:essay-mode]
-        self.master_btn.configure(state="normal")
-        self.delete_cache()
-        self.clean_temp_directory()
-        self.is_running = False
-        self.log_message("=== BATCH PROCESSING CONCLUDED. TEMP FOLDER SCRUBBED. ===")
+        try:
+            self.delete_cache()
+            self.clean_temp_directory()
+        except OSError:
+            self.log_message("[!] Batch cleanup could not clear the temporary folder.")
+        finally:
+            self.is_running = False
+            self._batch_pending = False
+            self._batch_model = None
+            self.update_indicator("idle")
+            self.run_btn.configure(state="normal")
+            self.max_score_entry.configure(state="normal")
+            self.mode_selector.configure(state="normal")
+            self.master_btn.configure(state="normal")
+            self.model_btn.configure(state="normal")
+        self.log_message("=== BATCH PROCESSING CONCLUDED. ===")
 
 if __name__ == "__main__":
     import socket

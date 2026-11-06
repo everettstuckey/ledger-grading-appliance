@@ -41,6 +41,9 @@ AZURE_PROVIDER_CODEX_MD5="8af269e1782c8a05d98d68780f21a207"
 CODEX_PROVIDER_MD5="152aed9cc226985b5c977a24b00abacb"
 GRADING_SCHEMA_MD5="81f37ad558a1baa973242a152a6867c1"
 CODEX_SKILL_MD5="6b2e8f037d8e7994aa73af324a031621"
+GUI_COPILOT_MD5="727e8478f6dd6dac2d29e73ffe2bcd49"
+DAEMON_COPILOT_MD5="1f4c82c7e36e02df85289553868634f1"
+COPILOT_PROVIDER_MD5="68ec2132350a8a022b4f9ef6de50bddc"
 
 APT_PKGS=(python3-venv python3-tk python3-dev tesseract-ocr tesseract-ocr-eng zenity wmctrl
           texlive-xetex texlive-latex-extra texlive-science texlive-fonts-recommended
@@ -98,7 +101,12 @@ check_source_md5() {
 }
 AZURE_BUILD=0
 CODEX_BUILD=0
-if [[ "$GUI_NOW" == "$GUI_CODEX_MD5" && "$DAEMON_NOW" == "$DAEMON_CODEX_MD5" ]]; then
+COPILOT_BUILD=0
+if [[ "$GUI_NOW" == "$GUI_COPILOT_MD5" && "$DAEMON_NOW" == "$DAEMON_COPILOT_MD5" ]]; then
+    check_source_md5 daemon/copilot_provider.py "$COPILOT_PROVIDER_MD5"
+    COPILOT_BUILD=1
+fi
+if (( COPILOT_BUILD )) || [[ "$GUI_NOW" == "$GUI_CODEX_MD5" && "$DAEMON_NOW" == "$DAEMON_CODEX_MD5" ]]; then
     check_source_md5 daemon/azure_provider.py "$AZURE_PROVIDER_CODEX_MD5"
     check_source_md5 daemon/codex_provider.py "$CODEX_PROVIDER_MD5"
     check_source_md5 daemon/grading_schema.py "$GRADING_SCHEMA_MD5"
@@ -178,6 +186,9 @@ else
             "$SOURCE/daemon/grading_schema.py" "$OPT/daemon/"
         act "copy Ledger grading skill" cp -- "$SOURCE/.agents/skills/ledger-grading/SKILL.md" \
             "$OPT/daemon/ledger-grading.SKILL.md"
+    fi
+    if (( COPILOT_BUILD )); then
+        act "copy Copilot desktop provider" cp -- "$SOURCE/daemon/copilot_provider.py" "$OPT/daemon/"
     fi
     act "own copied files" chown -R "$OWNER:ledger-teacher" "$OPT/engine" "$OPT/daemon"
 

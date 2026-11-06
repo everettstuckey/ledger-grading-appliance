@@ -23,7 +23,7 @@ It was built and tested in October 2026 on Debian 13.7 running on a Lenovo Think
 3. The software reads each page's title and ID, prepares images (see the table below), and sends them to the AI provider together with a blank copy of the document and the scoring instructions entered by the operator.
 4. The software writes a *conspectus* PDF per ID — the scanned pages, item-by-item feedback, and a score — plus a `Tabula.csv` of scores. A gradebook view can export a CSV.
 
-Ledger supports **Google** (Gemini through AI Studio or Vertex), **Anthropic** (Claude), **Azure OpenAI** (GPT-6.1 Sol or GPT-6 Astra through Microsoft Entra ID), and the **Codex desktop app**. [Set up Azure OpenAI](docs/AZURE_OPENAI.md) or [connect the Codex desktop app](docs/CODEX_DESKTOP.md).
+Ledger supports **Google** (Gemini through AI Studio or Vertex), **Anthropic** (Claude), **Azure OpenAI** (GPT-6.1 Sol or GPT-6 Astra through Microsoft Entra ID), the **Codex desktop app**, and a **Microsoft Copilot desktop bridge** for evaluation. [Azure OpenAI setup](docs/AZURE_OPENAI.md) · [Codex desktop setup](docs/CODEX_DESKTOP.md) · [Copilot desktop setup](docs/COPILOT_DESKTOP.md).
 
 ## What leaves the machine
 

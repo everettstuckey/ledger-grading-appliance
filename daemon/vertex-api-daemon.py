@@ -2,7 +2,7 @@
 """
 vertex-api-daemon.py  --  The Ledger's local AI broker  (v2.9, multi-provider
 + direct Anthropic API route + multi-image Silo 2 + Google-optional startup
-+ vendor-default sampling + Gemini Developer-API route + Azure OpenAI + Codex desktop).
++ vendor-default sampling + Gemini Developer-API route + Azure OpenAI + desktop handoffs).
 
 [PATCH:google-devapi] v2.9 (WO-A7): the Google route can be provisioned with a
 Google AI Studio API key (LEDGER_GOOGLE_API_KEY, "AIza...") INSTEAD of a GCP
@@ -37,6 +37,8 @@ call. Routing is by the model id the GUI sends:
            sign-in under the daemon service account.
   * Codex models (codex/gpt-6.1-sol, codex/gpt-6-astra)
         -> a private job folder for the signed-in Codex desktop app.
+  * Copilot models (copilot/gpt-6.1-sol, copilot/gpt-6-astra)
+        -> a loopback bridge to the signed-in Microsoft Copilot desktop app.
 
 [PATCH:multi-image] /api/silo2 additionally accepts an OPTIONAL "images_b64"
 array (essay / FULL_PAGE mode: one entry per student response page, in page
@@ -94,6 +96,9 @@ paragon-run daemon can read it):
   LEDGER_CODEX_ENABLED="true"                             (enable Codex desktop jobs)
   LEDGER_CODEX_JOB_DIR="..."                               (optional absolute jobs folder)
   LEDGER_CODEX_TIMEOUT_S="300"                            (optional Codex job timeout)
+  LEDGER_COPILOT_BRIDGE_URL="http://127.0.0.1:8790"       (enable Copilot desktop)
+  LEDGER_COPILOT_BRIDGE_TOKEN="..."                       (required for Copilot desktop)
+  LEDGER_COPILOT_TIMEOUT_S="320"                          (optional bridge read timeout)
 
 The Vertex routes share the same Google Application Default Credentials.
 The Anthropic and Azure Identity SDKs are loaded when their routes need them.
@@ -113,6 +118,7 @@ from google.genai.errors import APIError
 
 from azure_provider import AZURE_DEFAULT_MODEL, AZURE_MODELS, AzureOpenAIError, AzureOpenAIProvider
 from codex_provider import CODEX_DEFAULT_MODEL, CODEX_MODELS, CodexProvider, CodexProviderError
+from copilot_provider import COPILOT_DEFAULT_MODEL, COPILOT_MODELS, CopilotProvider, CopilotProviderError
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -205,31 +211,53 @@ if (ENV.get("LEDGER_CODEX_ENABLED") or "").strip().lower() == "true":
         _codex_config_error = str(exc)
         log.warning("Codex desktop is unavailable. %s", _codex_config_error)
 
-if not (_HAS_GOOGLE or _HAS_ANTHROPIC_KEY or _azure_client or _codex_client):
-    if _azure_config_error or _codex_config_error:
-        raise RuntimeError(_azure_config_error or _codex_config_error)
+_copilot_client = None
+_copilot_config_error = None
+_copilot_url = (ENV.get("LEDGER_COPILOT_BRIDGE_URL") or "").strip()
+if _copilot_url:
+    try:
+        _copilot_client = CopilotProvider(
+            _copilot_url,
+            ENV.get("LEDGER_COPILOT_BRIDGE_TOKEN") or "",
+            ENV.get("LEDGER_COPILOT_TIMEOUT_S") or "320",
+        )
+    except CopilotProviderError as exc:
+        _copilot_config_error = str(exc)
+        log.warning("Copilot desktop is unavailable. %s", _copilot_config_error)
+
+if not (_HAS_GOOGLE or _HAS_ANTHROPIC_KEY or _azure_client or _codex_client or _copilot_client):
+    config_error = _azure_config_error or _codex_config_error or _copilot_config_error
+    if config_error:
+        raise RuntimeError(config_error)
     raise RuntimeError(
         "No AI provider is configured in /etc/paragon/.env. Set "
         "LEDGER_GOOGLE_API_KEY (Google AI Studio key), GCP_PROJECT_ID "
         "(Google Vertex route), LEDGER_ANTHROPIC_API_KEY (direct Anthropic route), "
         "LEDGER_AZURE_OPENAI_ENDPOINT and LEDGER_AZURE_TENANT_ID (Azure OpenAI), "
-        "or LEDGER_CODEX_ENABLED=true (Codex desktop), "
+        "LEDGER_CODEX_ENABLED=true (Codex desktop), "
+        "or LEDGER_COPILOT_BRIDGE_URL and LEDGER_COPILOT_BRIDGE_TOKEN (Copilot desktop), "
         "then restart ledger-daemon.service."
     )
 
-_azure_only = _azure_client is not None and not (_HAS_GOOGLE or _HAS_ANTHROPIC_KEY or _codex_client)
-_codex_only = _codex_client is not None and not (_HAS_GOOGLE or _HAS_ANTHROPIC_KEY or _azure_client)
+_other_cloud_provider = _HAS_GOOGLE or _HAS_ANTHROPIC_KEY
+_azure_only = _azure_client is not None and not (_other_cloud_provider or _codex_client or _copilot_client)
+_codex_only = _codex_client is not None and not (_other_cloud_provider or _azure_client or _copilot_client)
+_copilot_only = _copilot_client is not None and not (_other_cloud_provider or _azure_client or _codex_client)
 if not _HAS_GOOGLE and not ENV.get("LEDGER_DEFAULT_MODEL"):
     if _azure_client and not _HAS_ANTHROPIC_KEY:
         DEFAULT_MODEL = AZURE_DEFAULT_MODEL
-    elif _codex_only:
+    elif _codex_client and not _HAS_ANTHROPIC_KEY:
         DEFAULT_MODEL = CODEX_DEFAULT_MODEL
+    elif _copilot_only:
+        DEFAULT_MODEL = COPILOT_DEFAULT_MODEL
     else:
         DEFAULT_MODEL = "claude-sonnet-5-5"
 if _azure_only and DEFAULT_MODEL.lower() not in AZURE_MODELS:
     raise RuntimeError("LEDGER_DEFAULT_MODEL must be gpt-6.1-sol or gpt-6-astra on an Azure OpenAI-only install.")
 if _codex_only and DEFAULT_MODEL.lower() not in CODEX_MODELS:
     raise RuntimeError("LEDGER_DEFAULT_MODEL must be codex/gpt-6.1-sol or codex/gpt-6-astra on a Codex-only install.")
+if _copilot_only and DEFAULT_MODEL.lower() not in COPILOT_MODELS:
+    raise RuntimeError("LEDGER_DEFAULT_MODEL must be copilot/gpt-6.1-sol or copilot/gpt-6-astra on a Copilot-only install.")
 
 # [PATCH:google-devapi] Which Google route this box is using, surfaced on the
 # health endpoint: "developer-api" (AI Studio key) | "vertex" | "absent".
@@ -293,6 +321,17 @@ def _require_codex(model_name):
             _codex_config_error or "invalid_request: Set LEDGER_CODEX_ENABLED=true to enable Codex desktop."
         )
     return _codex_client
+
+
+def _require_copilot(model_name):
+    if model_name.lower() not in COPILOT_MODELS:
+        raise CopilotProviderError("invalid_request: Select copilot/gpt-6.1-sol or copilot/gpt-6-astra.")
+    if _copilot_client is None:
+        raise CopilotProviderError(
+            _copilot_config_error or "invalid_request: Set LEDGER_COPILOT_BRIDGE_URL and "
+            "LEDGER_COPILOT_BRIDGE_TOKEN to enable Copilot desktop."
+        )
+    return _copilot_client
 
 
 # The Anthropic client is created lazily on first use (see _anthropic_client),
@@ -366,10 +405,12 @@ def _get_anthropic_client():
 
 
 def _provider_for(model_name):
-    """Route model IDs to Codex desktop, Azure OpenAI, Anthropic, or google-genai."""
+    """Route a model ID to its provider."""
     m = (model_name or "").lower()
     if m.startswith("codex/"):
         return "codex"
+    if m.startswith("copilot/"):
+        return "copilot"
     if m in AZURE_MODELS:
         return "azure-openai"
     if m.startswith("claude") or "anthropic/" in m or m.startswith("publishers/anthropic"):
@@ -382,7 +423,7 @@ def _provider_for(model_name):
 #   Google    : name = the Vertex cache resource name
 #   Anthropic : name = the sentinel "anthropic-local"; the actual reusable
 #               material is held in _anthropic_ctx and re-sent each grade.
-#   Azure OpenAI and Codex desktop share local masters and instructions.
+#   Azure OpenAI and the desktop providers share local masters and instructions.
 # ---------------------------------------------------------------------------
 _cache_lock = threading.Lock()
 _active_cache = {"name": None, "model": None}
@@ -395,7 +436,7 @@ _ANTHROPIC_SENTINEL = "anthropic-local"
 _google_ctx = {"system": "", "image_bytes": []}      # raw PNG bytes for master pages
 _GOOGLE_INLINE = "google-inline"
 _inline_ctx = {"system": "", "image_bytes": []}
-_INLINE_NAMES = {"azure-openai": "azure-openai-inline", "codex": "codex-inline"}
+_INLINE_NAMES = {"azure-openai": "azure-openai-inline", "codex": "codex-inline", "copilot": "copilot-inline"}
 
 
 def _purge_active_cache():
@@ -640,6 +681,8 @@ def health():
         "codex_route": "desktop" if _codex_client is not None else "absent",
         **({"codex_job_dir": str(_codex_client.job_dir)} if _codex_client is not None else {}),
         **({"codex_default_model": DEFAULT_MODEL} if _codex_only else {}),
+        "copilot_route": "desktop-bridge" if _copilot_client is not None else "absent",
+        **({"copilot_default_model": DEFAULT_MODEL} if _copilot_only else {}),
         "anthropic_sdk_installed": anthropic_available,
         "cache_active": cache_active,
         "cache_model": cache_model,
@@ -665,6 +708,10 @@ def silo1():
 
         if provider == "codex":
             text = _require_codex(model_name).respond(model_name, prompt, [png])
+            return jsonify({"status": "success", "text": text})
+
+        if provider == "copilot":
+            text = _require_copilot(model_name).respond(model_name, prompt, [png])
             return jsonify({"status": "success", "text": text})
 
         if provider == "anthropic":
@@ -712,6 +759,8 @@ def cache_build():
         if provider in _INLINE_NAMES:
             if provider == "codex":
                 _require_codex(model_name)
+            elif provider == "copilot":
+                _require_copilot(model_name)
             else:
                 _require_azure()
             cache_name = _INLINE_NAMES[provider]
@@ -857,12 +906,15 @@ def silo2():
             if schema is None:
                 raise ValueError("invalid_request: This provider requires the Ledger grading schema.")
             masters = master_pngs if master_pngs is not None else inline_imgs
+            options = {}
             if provider == "codex":
                 provider_client = _require_codex(cache_model)
-                options = {"master_image_count": len(masters)}
+            elif provider == "copilot":
+                provider_client = _require_copilot(cache_model)
             else:
                 provider_client = _require_azure()
-                options = {}
+            if provider != "azure-openai":
+                options["master_image_count"] = len(masters)
             text = provider_client.respond(
                 cache_model, prompt, [*masters, *live_pngs],
                 instructions=inline_system, grading_schema=schema, **options,
@@ -1025,4 +1077,5 @@ if __name__ == "__main__":
     log.info("Claude route for this box: %s", _anthropic_route)
     log.info("Azure OpenAI route for this box: %s", "entra-cli" if _azure_client is not None else "absent")
     log.info("Codex desktop route for this box: %s", "desktop" if _codex_client is not None else "absent")
+    log.info("Copilot desktop route for this box: %s", "desktop-bridge" if _copilot_client is not None else "absent")
     serve(app, host=HOST, port=PORT, threads=4)
