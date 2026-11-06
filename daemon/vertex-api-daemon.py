@@ -228,11 +228,15 @@ if (ENV.get("LEDGER_CODEX_ENABLED") or "").strip().lower() == "true":
 _copilot_client = None
 _copilot_config_error = None
 _copilot_url = (ENV.get("LEDGER_COPILOT_BRIDGE_URL") or "").strip()
+_copilot_token = ENV.get("LEDGER_COPILOT_BRIDGE_TOKEN") or ""
+if os.name == "nt" and _WINDOWS_READY_FILE and ENV.get("LEDGER_COPILOT_LOCAL_ACCOUNT"):
+    _copilot_url = os.environ.get("LEDGER_MANAGED_COPILOT_URL", "")
+    _copilot_token = os.environ.get("LEDGER_MANAGED_COPILOT_TOKEN", "")
 if _copilot_url:
     try:
         _copilot_client = CopilotProvider(
             _copilot_url,
-            ENV.get("LEDGER_COPILOT_BRIDGE_TOKEN") or "",
+            _copilot_token,
             ENV.get("LEDGER_COPILOT_TIMEOUT_S") or "320",
         )
     except CopilotProviderError as exc:

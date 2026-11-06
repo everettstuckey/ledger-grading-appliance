@@ -7,7 +7,7 @@ Ledger runs as a native Windows desktop app with Python 3.12 x64. It starts its 
 1. Install [64-bit Python 3.12](https://www.python.org/downloads/windows/) with the Windows launcher.
 2. Install [Tesseract OCR](https://tesseract-ocr.github.io/tessdoc/Installation.html#windows) with English recognition data. Ledger looks for it in PATH and common Windows installation folders.
 3. Install [MiKTeX](https://miktex.org/howto/install-miktex) or [TeX Live](https://www.tug.org/texlive/windows.html) for PDF feedback. Ensure the XeLaTeX command and report packages are available to your Windows account. Windows reports use Times New Roman. XeLaTeX needs fontspec, geometry, graphics, eso-pic, mhchem, amsmath, amsfonts, xcolor, environ, and needspace.
-4. Open PowerShell in this repository and run the launcher.
+4. Open PowerShell in this repository and run the launcher. For local Copilot, [set the pairing options](COPILOT_DESKTOP.md#pair-ledger-on-the-same-windows-pc) before launching.
 
 ~~~powershell
 .\Start-Ledger.ps1
@@ -19,7 +19,7 @@ In **System Initialization**, configure an evaluation provider and review the ev
 
 ## Connect an AI provider
 
-- **Copilot desktop.** Start the Windows bridge as described in the [Copilot setup guide](COPILOT_DESKTOP.md). If Ledger and Copilot run on the same PC, they connect over localhost. Enter the bridge token in Ledger and select the exact Copilot model in **AI Model**.
+- **Copilot desktop.** [Pair Copilot on the same Windows PC](COPILOT_DESKTOP.md#pair-ledger-on-the-same-windows-pc) by setting `LEDGER_COPILOT_LOCAL_ACCOUNT` to the exact work address shown in the running Copilot app. **System Initialization** selects local Copilot automatically. Accept the evaluation terms to finish setup. Ledger starts the authenticated local bridge and manages its private token. Use [manual bridge setup](COPILOT_DESKTOP.md#set-up-the-windows-bridge-manually) for a separate host.
 - **Codex desktop.** Enable Codex during setup. In **AI Model**, select the Codex model and use **Open Codex app**. The handoff directory lives in your Ledger workspace. See the [Codex setup guide](CODEX_DESKTOP.md).
 - **Google, Anthropic, or Azure OpenAI.** Enter the provider's settings in the same wizard. For Azure, sign in with Azure CLI under the Windows account that runs Ledger.
 

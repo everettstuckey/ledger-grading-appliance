@@ -394,12 +394,13 @@ BILLING_DISCLOSURE_TEXT = (
 
 
 def wizard_provider_state(ai_key, gcp_id, has_creds, anth_key, billing_confirmed,
-                          azure_endpoint="", azure_tenant="", codex_enabled=False, copilot_token=""):
+                          azure_endpoint="", azure_tenant="", codex_enabled=False, copilot_token="",
+                          local_copilot=False):
     """Pure provider-completeness rule for the SYSTEM INITIALIZATION wizard.
 
     Google is complete as EITHER an AI Studio key OR (Project ID + service-account
     JSON), Anthropic as an sk-ant- key, Azure as an endpoint plus tenant ID,
-    Codex as an enabled desktop handoff, and Copilot with a bridge token.
+    Codex as an enabled desktop handoff, and Copilot via a local or manually configured bridge.
     At least one complete provider is required.
     Both Google forms at once -> block (one Google route per box). A half-entered
     Vertex pair -> block. A malformed Anthropic key -> block. An AI Studio key
@@ -424,7 +425,7 @@ def wizard_provider_state(ai_key, gcp_id, has_creds, anth_key, billing_confirmed
     anth_complete = anth_key.startswith(ANTHROPIC_PREFIX)
     anth_malformed = bool(anth_key) and not anth_complete
     azure_complete = bool(AZURE_ENDPOINT.fullmatch(azure_endpoint) and AZURE_TENANT.fullmatch(azure_tenant))
-    copilot_complete = bool(COPILOT_BRIDGE_TOKEN.fullmatch(copilot_token))
+    copilot_complete = local_copilot or bool(COPILOT_BRIDGE_TOKEN.fullmatch(copilot_token))
 
     warnings = []
     if ai_present and ai_key.startswith(ANTHROPIC_PREFIX):
@@ -1087,9 +1088,14 @@ class LedgerGUI:
         ctk.CTkLabel(body, text="Open the handoff folder in Codex and use synthetic work for evaluation.",
                      font=note_font).pack(pady=(0, 8))
 
-        _, copilot_token_var = _masked_row(body, "COPILOT BRIDGE TOKEN:")
-        copilot_note = ("For Copilot, start the bridge on this computer before grading." if self.runtime is not None
-                        else "For Copilot, start the Windows bridge and SSH tunnel before grading.")
+        local_copilot_account = os.environ.get("LEDGER_COPILOT_LOCAL_ACCOUNT", "").strip() if self.runtime else ""
+        if local_copilot_account:
+            copilot_token_var = ctk.StringVar(value="")
+            copilot_note = "Copilot on this PC is selected. Ledger will manage the bridge credential."
+        else:
+            _, copilot_token_var = _masked_row(body, "COPILOT BRIDGE TOKEN:")
+            copilot_note = ("For Copilot, start the bridge on this computer before grading." if self.runtime is not None
+                            else "For Copilot, start the Windows bridge and SSH tunnel before grading.")
         ctk.CTkLabel(body, text=copilot_note, font=note_font).pack(pady=(0, 8))
 
         # One-line provider rule so the operator knows what unlocks the button.
@@ -1366,7 +1372,7 @@ class LedgerGUI:
             st = wizard_provider_state(ai_key, gcp_var.get(), creds_state['path'] is not None,
                                         anth_var.get(), billing_var.get() == "on",
                                         azure_endpoint_var.get(), azure_tenant_var.get(),
-                                        codex_var.get(), copilot_token_var.get())
+                                        codex_var.get(), copilot_token_var.get(), bool(local_copilot_account))
             disclosure_btn.configure(state="normal" if ai_key else "disabled")
             provider_rule.configure(text=st["message"], text_color=WIZARD_LEVEL_COLORS[st["level"]])
             has_rep = len(rep_var.get().strip()) > 0
@@ -1398,7 +1404,7 @@ class LedgerGUI:
 
             st = wizard_provider_state(ai_key, new_key, creds_state['path'] is not None,
                                         anth_key, billing_var.get() == "on", azure_endpoint, azure_tenant,
-                                        codex_var.get(), copilot_token)
+                                        codex_var.get(), copilot_token, bool(local_copilot_account))
             use_ai = st["use_ai_studio"]
             use_vertex = st["use_vertex"]
             use_anthropic = st["use_anthropic"]
@@ -1406,7 +1412,7 @@ class LedgerGUI:
             use_codex = st["use_codex"]
             use_copilot = st["use_copilot"]
 
-            if st["ok"] and rep_name:
+            if st["ok"] and rep_name and check_var.get() == "on":
                 env_lines = []
                 if use_ai:
                     env_lines.append(f'LEDGER_GOOGLE_API_KEY="{ai_key}"\n')
@@ -1426,7 +1432,19 @@ class LedgerGUI:
                     ))
                 if use_codex:
                     env_lines.append('LEDGER_CODEX_ENABLED="true"\n')
-                if use_copilot:
+                if use_copilot and local_copilot_account:
+                    cdp_port = os.environ.get("COPILOT_CDP_PORT", "9337").strip()
+                    model = os.environ.get("LEDGER_DEFAULT_MODEL", "").strip()
+                    if not re.fullmatch(r"[^\s\"']+@[^\s\"']+", local_copilot_account) or not cdp_port.isdecimal():
+                        messagebox.showerror("Ledger setup", "Check the Copilot work account and debugging port.", parent=setup_win)
+                        return
+                    env_lines.extend((
+                        f'LEDGER_COPILOT_LOCAL_ACCOUNT="{local_copilot_account}"\n',
+                        f'LEDGER_COPILOT_CDP_PORT="{cdp_port}"\n',
+                    ))
+                    if re.fullmatch(r"copilot/[a-z0-9.-]+", model):
+                        env_lines.append(f'LEDGER_DEFAULT_MODEL="{model}"\n')
+                elif use_copilot:
                     env_lines.extend((
                         f'LEDGER_COPILOT_BRIDGE_URL="{COPILOT_BRIDGE_URL}"\n',
                         f'LEDGER_COPILOT_BRIDGE_TOKEN="{copilot_token}"\n',

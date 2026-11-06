@@ -6,15 +6,9 @@ Ledger offers `copilot/gpt-5.6-sol`, `copilot/gpt-6.1-sol`, and `copilot/gpt-6-a
 
 A synthetic Windows batch verified GPT-5.6 Sol with the signed-in Copilot desktop app and produced the expected score, PDF, and CSV.
 
-## Set up the Windows bridge
+## Start Copilot with a dedicated profile
 
-The bridge requires Python 3.9 or later on Windows.
-
-1. Close the Copilot app normally, including any instance still running in the notification area. Open it from PowerShell with the debugging port and a dedicated Ledger Copilot profile, as shown below. Reuse that dedicated profile on subsequent launches.
-2. Confirm that the chosen debugging port is listening on loopback. Copilot `156.0.4314.58` reports that remote debugging requires a non-default data directory when started with `Microsoft\Copilot\User Data`, even when the path is passed explicitly. Choosing another port still requires a dedicated profile.
-3. Sign in to your Microsoft work or school account inside the dedicated Copilot profile. Check the [enterprise data protection indicator](https://learn.microsoft.com/en-us/copilot/privacy-and-protections) in the chat. The dedicated profile has its own sign-in state.
-4. Generate a bridge token with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Enter the same token on Windows and in Ledger. Keep it in private configuration.
-5. In the same PowerShell session, set `COPILOT_EXPECTED_ACCOUNT` to the work or school email shown by the Copilot app, and `COPILOT_BRIDGE_TOKEN` to the token. Run `python bridge/copilot/copilot_bridge.py` from the source checkout. The bridge listens on `127.0.0.1:8790`. Select an approved model in Copilot before running the bridge with `--probe`. The probe checks the desktop session without submitting a prompt.
+Close Copilot normally, including any instance still running in the notification area. Then open it from PowerShell with a dedicated Ledger Copilot profile. Reuse this profile on subsequent launches. Copilot 156.0.4314.58 requires a non-default profile for remote debugging.
 
 ~~~powershell
 $copilot = ${env:ProgramFiles(x86)} + '\Microsoft\Copilot\Application\copilotapp.exe'
@@ -24,11 +18,32 @@ $env:COPILOT_CDP_PORT = '9337'
 Get-NetTCPConnection -State Listen -LocalPort ([int]$env:COPILOT_CDP_PORT) | Select-Object LocalAddress, LocalPort
 ~~~
 
-Use the result only if the port listens on loopback. Set `COPILOT_CDP_PORT` to the same value in any new PowerShell session that starts the bridge. The debugging port is separate from the bridge's HTTP port, `8790`. This is desktop UI automation and uses no supported Microsoft inference API.
+Confirm the debug port listens on `127.0.0.1` and only on loopback addresses. Sign in with your work or school account in Copilot and check the [enterprise data protection indicator](https://learn.microsoft.com/en-us/copilot/privacy-and-protections). The dedicated profile has its own sign-in state.
 
-## Connect the appliance
+## Pair Ledger on the same Windows PC
 
-When Ledger and the bridge run on the same Windows PC, Ledger connects to the bridge over localhost. Follow the [Windows setup guide](WINDOWS.md) and enter the bridge token in **System Initialization**.
+Leave Copilot running. Before your first Ledger launch, open PowerShell in the repository and set the exact work or school email shown in Copilot.
+
+~~~powershell
+$env:LEDGER_COPILOT_LOCAL_ACCOUNT = 'teacher@example.org'
+# Optional. Match the port you used to start Copilot. Default is 9337.
+# $env:COPILOT_CDP_PORT = '9337'
+# Optional. Select a model available to your account. Default is copilot/gpt-6.1-sol.
+# $env:LEDGER_DEFAULT_MODEL = 'copilot/gpt-5.6-sol'
+.\Start-Ledger.ps1
+~~~
+
+**System Initialization** selects local Copilot automatically. Review and accept the evaluation terms to finish setup. Ledger saves the work address and debugging port, then starts an authenticated bridge on loopback. It generates a fresh private bridge token each time it starts.
+
+## Set up the Windows bridge manually
+
+Use manual setup when Ledger and Copilot run on different machines or when maintaining an existing manual pairing. The bridge requires Python 3.9 or later on Windows.
+
+1. [Start Copilot with its dedicated profile](#start-copilot-with-a-dedicated-profile) and sign in.
+2. Generate a private bridge token with `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+3. Set `COPILOT_EXPECTED_ACCOUNT` to the exact work email in Copilot, `COPILOT_BRIDGE_TOKEN` to the generated token, and `COPILOT_CDP_PORT` to the port used by Copilot.
+4. From the repository, run `python bridge/copilot/copilot_bridge.py --probe` to verify the account and selected model. Then run `python bridge/copilot/copilot_bridge.py` to start the bridge on `127.0.0.1:8790`.
+5. Enter the same token in Ledger's **System Initialization** screen. For an existing Debian installation, use the upgrade steps below.
 
 For a separate Debian appliance, forward the bridge port through an existing approved SSH connection to the Windows computer. Keep the tunnel open while grading.
 
@@ -36,7 +51,9 @@ For a separate Debian appliance, forward the bridge port through an existing app
 ssh -NT -o ExitOnForwardFailure=yes -L 127.0.0.1:8790:127.0.0.1:8790 operator@windows-host
 ~~~
 
-For a new installation, enter the token in Ledger's **System Initialization** screen. For an existing installation, use the upgrade steps below. Select an available Copilot model in **AI Model** and run a synthetic batch. Keep the work account selected and leave the Copilot chat available to the bridge during the batch. Ledger checks the returned data before accepting the transcription or grades. The bridge accepts up to 20 images per request, including reference pages. For long essays, set `LEDGER_ESSAY_MAX_PAGES_PER_CALL` in the GUI environment to leave room for the reference pages. After a failed upload or send, check the desktop app for a leftover draft before retrying.
+## Run a synthetic batch
+
+Select an available Copilot model in **AI Model**. Keep the work account selected and the Copilot chat available during the batch. The bridge accepts up to 20 images per request, including reference pages. For long essays, set `LEDGER_ESSAY_MAX_PAGES_PER_CALL` in the GUI environment to leave room for the reference pages. After a failed upload or send, check Copilot for a leftover draft before retrying.
 
 ## Existing Debian Ledger installations
 

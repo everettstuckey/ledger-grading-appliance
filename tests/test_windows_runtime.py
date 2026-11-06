@@ -1,5 +1,6 @@
 """Exercise the managed daemon with native Windows processes and synthetic setup."""
 
+import base64
 import json
 import sys
 import tempfile
@@ -7,6 +8,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 import requests
 
@@ -84,6 +86,65 @@ class WindowsRuntimeTests(unittest.TestCase):
         self.assertEqual(process.poll(), 0)
         self.assertFalse(self.runtime.env_path.exists())
         self.assertFalse(self.runtime.init_path.exists())
+
+    def test_managed_copilot_pairs_and_stops_without_persisting_token(self):
+        account = "teacher@example.org"
+        model = "copilot/gpt-6.1-sol"
+        env_text = f'LEDGER_COPILOT_LOCAL_ACCOUNT="{account}"\n'
+        image = png("blue")
+        review_calls = []
+
+        def review(prompt, files, selected_model):
+            review_calls.append((prompt, [Path(file).read_bytes() for file in files], selected_model))
+            return '{"bartonian_id": 312}'
+
+        with patch("bridge.copilot.copilot_bridge.ChatDriver", autospec=True) as driver:
+            driver.return_value.__enter__.return_value.review.side_effect = review
+            self.runtime.save_setup(env_text, None, "synthetic initialization\n")
+            server = self.runtime._copilot_server
+            worker = self.runtime._copilot_thread
+            process = self.runtime._process
+
+            self.assertEqual(server.server_address[0], "127.0.0.1")
+            self.assertGreater(server.server_port, 0)
+            self.assertTrue(worker.is_alive())
+            self.assertEqual(server.settings.account, account)
+            self.assertEqual(server.settings.cdp_port, 9337)
+            self.assertRegex(server.settings.token, r"^[A-Za-z0-9_-]{32,128}$")
+            self.assertEqual(self.runtime.env_path.read_text(encoding="utf-8"), env_text)
+            self.assertTrue(self.runtime.init_path.is_file())
+
+            health = self.runtime.request("GET", "/", timeout=5)
+            health.raise_for_status()
+            self.assertEqual(health.json()["copilot_route"], "desktop-bridge")
+            self.assertEqual(health.json()["copilot_default_model"], model)
+            self.assertNotIn(server.settings.token, health.text)
+            with requests.Session() as untrusted:
+                untrusted.trust_env = False
+                bridge_health = f"http://127.0.0.1:{server.server_port}/health"
+                self.assertEqual(untrusted.get(bridge_health, timeout=5).status_code, 401)
+            driver.assert_not_called()
+
+            prompt = 'Transcribe the synthetic ID as {"bartonian_id": 312}.'
+            ocr = self.runtime.request("POST", "/api/silo1", json={
+                "prompt": prompt,
+                "image_b64": image,
+            }, timeout=5)
+            ocr.raise_for_status()
+            self.assertEqual(json.loads(ocr.json()["text"]), {"bartonian_id": 312})
+            self.assertEqual(len(review_calls), 1)
+            reviewed_prompt, reviewed_images, reviewed_model = review_calls[0]
+            self.assertTrue(reviewed_prompt.startswith(prompt))
+            self.assertEqual(reviewed_images, [base64.b64decode(image)])
+            self.assertEqual(reviewed_model, model)
+
+            self.runtime.close()
+            self.assertEqual(process.poll(), 0)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(server.socket.fileno(), -1)
+            self.assertIsNone(self.runtime._copilot_server)
+            self.assertIsNone(self.runtime._copilot_thread)
+            self.assertEqual(self.runtime.env_path.read_text(encoding="utf-8"), env_text)
 
     def test_failed_setup_restores_existing_uninitialized_configuration(self):
         original = "# synthetic prior configuration\n"

@@ -6,7 +6,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import requests
@@ -17,6 +19,9 @@ ENV_PATH = CONFIG_DIR / ".env"
 SA_PATH = CONFIG_DIR / "sa.json"
 INIT_PATH = CONFIG_DIR / "initialized"
 DAEMON_PATH = Path(__file__).resolve().parents[1] / "daemon" / "vertex-api-daemon.py"
+sys.path.insert(0, str(DAEMON_PATH.parents[1]))
+
+from bridge.copilot import copilot_bridge
 
 
 def workspace_path():
@@ -41,6 +46,8 @@ class WindowsRuntime:
         self._process = None
         self._port = None
         self._token = None
+        self._copilot_server = None
+        self._copilot_thread = None
 
     def __enter__(self):
         import msvcrt
@@ -82,13 +89,20 @@ class WindowsRuntime:
             }
             if self.sa_path.is_file():
                 child_env["GOOGLE_APPLICATION_CREDENTIALS"] = str(self.sa_path)
-            with self.log_path.open("wb") as log:
-                self._process = subprocess.Popen(
-                    [sys.executable, "-u", str(DAEMON_PATH)],
-                    env=child_env, cwd=DAEMON_PATH.parent,
-                    stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
+            for key in ("LEDGER_MANAGED_COPILOT_URL", "LEDGER_MANAGED_COPILOT_TOKEN"):
+                child_env.pop(key, None)
+            try:
+                child_env.update(self._start_local_copilot())
+                with self.log_path.open("wb") as log:
+                    self._process = subprocess.Popen(
+                        [sys.executable, "-u", str(DAEMON_PATH)],
+                        env=child_env, cwd=DAEMON_PATH.parent,
+                        stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+            except (OSError, RuntimeError):
+                self.close()
+                raise
             try:
                 deadline = time.monotonic() + 25
                 while time.monotonic() < deadline and self._process.poll() is None:
@@ -110,6 +124,33 @@ class WindowsRuntime:
         self.close()
         raise RuntimeError(f"Ledger's daemon could not start. See {self.log_path}.")
 
+    def _start_local_copilot(self):
+        values = {}
+        for line in self.env_path.read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() in {"LEDGER_COPILOT_LOCAL_ACCOUNT", "LEDGER_COPILOT_CDP_PORT"}:
+                values[key.strip()] = value.strip().strip('"').strip("'")
+        account = values.get("LEDGER_COPILOT_LOCAL_ACCOUNT")
+        if not account:
+            return {}
+
+        token = secrets.token_urlsafe(32)
+        try:
+            settings = copilot_bridge.Settings.from_env({
+                "COPILOT_BRIDGE_TOKEN": token,
+                "COPILOT_EXPECTED_ACCOUNT": account,
+                "COPILOT_CDP_PORT": values.get("LEDGER_COPILOT_CDP_PORT", "9337"),
+            })
+        except copilot_bridge.BridgeError as exc:
+            raise RuntimeError(str(exc)) from None
+        self._copilot_server = copilot_bridge.BridgeServer(replace(settings, port=0))
+        self._copilot_thread = threading.Thread(target=self._copilot_server.serve_forever, daemon=True)
+        self._copilot_thread.start()
+        return {
+            "LEDGER_MANAGED_COPILOT_URL": f"http://127.0.0.1:{self._copilot_server.server_port}",
+            "LEDGER_MANAGED_COPILOT_TOKEN": token,
+        }
+
     def request(self, method, endpoint, **kwargs):
         if self._port is None or self._process is None or self._process.poll() is not None:
             raise requests.ConnectionError("Ledger's Windows daemon is stopped. Reopen Ledger to start it.")
@@ -123,14 +164,23 @@ class WindowsRuntime:
     def close(self):
         process, self._process = self._process, None
         self._port = self._token = None
-        if process is not None:
-            if process.stdin is not None:
-                process.stdin.close()
-            try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+        try:
+            if process is not None:
+                if process.stdin is not None:
+                    process.stdin.close()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+        finally:
+            server, self._copilot_server = self._copilot_server, None
+            worker, self._copilot_thread = self._copilot_thread, None
+            if server is not None:
+                if worker is not None and worker.is_alive():
+                    server.shutdown()
+                    worker.join()
+                server.server_close()
 
     def save_setup(self, env_text, service_account_path, marker_text):
         """Install private configuration and mark setup complete after daemon readiness."""
