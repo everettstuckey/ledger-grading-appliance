@@ -37,7 +37,7 @@ call. Routing is by the model id the GUI sends:
            sign-in under the daemon service account.
   * Codex models (codex/gpt-6.1-sol, codex/gpt-6-astra)
         -> a private job folder for the signed-in Codex desktop app.
-  * Copilot models (copilot/gpt-6.1-sol, copilot/gpt-6-astra)
+  * Copilot models (copilot/gpt-6.1-sol, copilot/gpt-6-astra, copilot/gpt-5.6-sol)
         -> a loopback bridge to the signed-in Microsoft Copilot desktop app.
 
 [PATCH:multi-image] /api/silo2 additionally accepts an OPTIONAL "images_b64"
@@ -121,7 +121,13 @@ from google.genai.errors import APIError
 
 from azure_provider import AZURE_DEFAULT_MODEL, AZURE_MODELS, AzureOpenAIError, AzureOpenAIProvider
 from codex_provider import CODEX_DEFAULT_MODEL, CODEX_MODELS, CodexProvider, CodexProviderError
-from copilot_provider import COPILOT_DEFAULT_MODEL, COPILOT_MODELS, CopilotProvider, CopilotProviderError
+from copilot_provider import (
+    COPILOT_DEFAULT_MODEL,
+    COPILOT_MODEL_OPTIONS,
+    COPILOT_MODELS,
+    CopilotProvider,
+    CopilotProviderError,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -265,7 +271,10 @@ if _azure_only and DEFAULT_MODEL.lower() not in AZURE_MODELS:
 if _codex_only and DEFAULT_MODEL.lower() not in CODEX_MODELS:
     raise RuntimeError("LEDGER_DEFAULT_MODEL must be codex/gpt-6.1-sol or codex/gpt-6-astra on a Codex-only install.")
 if _copilot_only and DEFAULT_MODEL.lower() not in COPILOT_MODELS:
-    raise RuntimeError("LEDGER_DEFAULT_MODEL must be copilot/gpt-6.1-sol or copilot/gpt-6-astra on a Copilot-only install.")
+    raise RuntimeError(
+        "LEDGER_DEFAULT_MODEL must name a supported Copilot model on a Copilot-only install. "
+        f"Supported IDs are {COPILOT_MODEL_OPTIONS}."
+    )
 
 # [PATCH:google-devapi] Which Google route this box is using, surfaced on the
 # health endpoint: "developer-api" (AI Studio key) | "vertex" | "absent".
@@ -333,7 +342,7 @@ def _require_codex(model_name):
 
 def _require_copilot(model_name):
     if model_name.lower() not in COPILOT_MODELS:
-        raise CopilotProviderError("invalid_request: Select copilot/gpt-6.1-sol or copilot/gpt-6-astra.")
+        raise CopilotProviderError(f"invalid_request: Copilot desktop supports {COPILOT_MODEL_OPTIONS}.")
     if _copilot_client is None:
         raise CopilotProviderError(
             _copilot_config_error or "invalid_request: Set LEDGER_COPILOT_BRIDGE_URL and "

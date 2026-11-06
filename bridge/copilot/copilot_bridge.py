@@ -24,6 +24,7 @@ LOOPBACK = "127.0.0.1"
 COPILOT_HOST = "cr.m365copilotapp.svc.cloud.microsoft"
 CHAT_PATH = re.compile(r"/hwav2/chat(?:/[A-Za-z0-9_-]+)*/?\Z")
 MODEL_LABELS = {
+    "copilot/gpt-5.6-sol": "gpt 5.6 sol",
     "copilot/gpt-6.1-sol": "gpt 6.1 sol",
     "copilot/gpt-6-astra": "gpt 6 astra",
 }
@@ -263,12 +264,38 @@ const buttons = (root = document) =>
 const named = (pattern, root = document) => buttons(root).find(e => pattern.test(label(e)));
 const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
 const composer = () => {
-  const edit = document.querySelector('#chat-input');
-  return visible(edit) && (edit.isContentEditable || edit.matches('textarea,input[type="text"]')) ? edit : null;
+  const editors = [...document.querySelectorAll('#chat-input, #m365-chat-editor-target-element')]
+    .filter(e => visible(e) && (e.isContentEditable || e.matches('textarea,input[type="text"]')));
+  return editors.length === 1 ? editors[0] : null;
 };
-const draft = edit => typeof edit.value === 'string' ? edit.value : edit.innerText;
-const accountControl = () => named(
+const draft = edit => {
+  const text = typeof edit.value === 'string' ? edit.value : edit.innerText;
+  return edit.id === 'm365-chat-editor-target-element' ? text.replace(/^[\u200b\u200c]+|[\u200b\u200c]+$/g, '') : text;
+};
+const workAccountControl = () => {
+  const matches = [...document.querySelectorAll('[data-testid="nav-footer"] div[role="button"]')]
+    .filter(e => visible(e) && /\bwork account$/i.test(label(e)));
+  return matches.length === 1 ? matches[0] : null;
+};
+const accountControl = () => workAccountControl() || named(
   /^(account manager\b|account switcher\b|your account\b|profile menu\b|manage account\b|user profile\b|signed in as\b)/i);
+const openDialogs = () => [...document.querySelectorAll('[role="dialog"]')].filter(visible);
+const workAccountCard = dialogs => {
+  if (dialogs.length !== 1) return null;
+  const [dialog] = dialogs;
+  if (dialog.getAttribute('aria-modal') !== 'true' || !/\baccount\b/i.test(label(dialog))) return null;
+  const signOut = buttons(dialog).filter(e => /^sign out$/i.test(normalize(e.innerText)));
+  if (signOut.length !== 1) return null;
+  const group = signOut[0].closest('[role="group"]');
+  if (!group || !dialog.contains(group)) return null;
+  return [...group.children].find(e => e.contains(signOut[0])) || null;
+};
+const accountMenuState = button => {
+  if (button !== workAccountControl()) return button.getAttribute('aria-expanded');
+  const dialogs = openDialogs();
+  if (dialogs.length === 0) return 'false';
+  return workAccountCard(dialogs) ? 'true' : null;
+};
 const textParts = e => [e.innerText || '', label(e), e.getAttribute('title') || '',
   ...((e.getAttribute('aria-describedby') || '').split(/\s+/).filter(Boolean)
     .map(id => document.getElementById(id)).filter(visible).map(d => d.innerText || ''))];
@@ -281,19 +308,30 @@ const profileParts = button => {
     button.parentElement;
   return profile && (profile.innerText || '').length < 250 ? textParts(profile) : textParts(button);
 };
-const accountVerified = () => {
-  const button = accountControl();
-  if (!button) return false;
+const legacyAccountParts = button => {
   const menuId = button.getAttribute('aria-controls') || button.getAttribute('aria-owns');
   const menu = menuId && document.getElementById(menuId);
   const selected = visible(menu) ? [...menu.querySelectorAll(
     '[data-testid="active-account"],[data-testid="current-account"],' +
     '[role="menuitemradio"][aria-checked="true"],[role="option"][aria-selected="true"],' +
     '[role="menuitem"][aria-current="true"]')].filter(visible) : [];
-  if (selected.length > 1) return false;
+  if (selected.length > 1) return [];
   const parts = [...textParts(button), ...profileParts(button), ...selected.flatMap(textParts)];
+  return hasWork(parts) ? parts : [];
+};
+const accountVerified = () => {
+  const button = accountControl();
+  if (!button) return false;
+  let parts;
+  if (button === workAccountControl()) {
+    const card = workAccountCard(openDialogs());
+    if (!card) return false;
+    parts = textParts(card);
+  } else {
+    parts = legacyAccountParts(button);
+  }
   const identities = emails(parts);
-  if (identities.length !== 1 || identities[0] !== expectedAccount || !hasWork(parts)) return false;
+  if (identities.length !== 1 || identities[0] !== expectedAccount) return false;
   window[guardKey] = [button, label(button), button.getAttribute('title'), normalize(button.innerText)];
   return true;
 };
@@ -301,6 +339,7 @@ const accountGuard = () => {
   const button = accountControl(), saved = window[guardKey];
   if (!button || !saved || saved[0] !== button || saved[1] !== label(button) ||
       saved[2] !== button.getAttribute('title') || saved[3] !== normalize(button.innerText)) return false;
+  if (button === workAccountControl() && openDialogs().length) return false;
   const parts = [...textParts(button), ...profileParts(button)], identities = emails(parts);
   const personal = parts.some(part => part.split(/\r?\n/).some(
     line => /^(personal|personal account)$/i.test(line.trim())));
@@ -348,9 +387,11 @@ const turns = () => {
   });
 };
 const composerGroup = () => {
+  const edit = composer();
+  const limit = edit?.id === 'm365-chat-editor-target-element' ? 10 : 7;
   const profile = accountControl(), chatStart = newChat(), currentTurns = turns();
   let match = null;
-  for (let group = composer(), n = 0; group && n < 7; group = group.parentElement, n++) {
+  for (let group = edit, n = 0; group && n < limit; group = group.parentElement, n++) {
     if (group === document.body || (profile && group.contains(profile)) ||
         (chatStart && group.contains(chatStart)) ||
         currentTurns.some(t => group.contains(t.container))) break;
@@ -363,7 +404,8 @@ const attachmentCount = () => {
   return group ? buttons(group).filter(b => /^Remove attachment(?:\b|:)/i.test(label(b))).length : -1;
 };
 const onNewRoute = () => /^\/hwav2\/chat\/?$/.test(location.pathname) && !location.hash &&
-  ![...new URLSearchParams(location.search).keys()].some(k => /(?:conversation|thread|chat|session)/i.test(k));
+  ![...new URLSearchParams(location.search).keys()].some(k =>
+    k !== 'M365ChatFeatures' && /(?:conversation|thread|chat|session)/i.test(k));
 const emptyChat = () => {
   const edit = composer();
   return !!edit && onNewRoute() && !normalize(draft(edit)) && attachmentCount() === 0 &&
@@ -393,7 +435,7 @@ def _label_id(value):
         return None
     normalized = " ".join(value.casefold().split()).replace("gpt-", "gpt ")
     for model_id, name in MODEL_LABELS.items():
-        if normalized in {name, name + " think deeper", name + " quick response"}:
+        if normalized in {name, name + " think", name + " think deeper", name + " quick response"}:
             return model_id
     return None
 
@@ -447,7 +489,7 @@ class ChatDriver:
             return
         opened = self._js("""
           const b = accountControl();
-          if (!b || b.getAttribute('aria-expanded') !== 'false') return false;
+          if (!b || accountMenuState(b) !== 'false') return false;
           b.click();
           return true;
         """)
@@ -459,7 +501,7 @@ class ChatDriver:
             finally:
                 self._js("""
                   const b = accountControl();
-                  if (b && b.getAttribute('aria-expanded') === 'true') b.click();
+                  if (b && accountMenuState(b) === 'true') b.click();
                   return null;
                 """)
         raise BridgeError("The configured Microsoft work account was not verified.")
@@ -516,6 +558,7 @@ class ChatDriver:
                    "A fresh empty Copilot chat could not be verified. No review was sent.")
         self._assert_account()
         self._select_model(model_id)
+        self._assert_account()
 
         # The file-input handle is scoped to this document. Navigation invalidates it.
         model_label = self._js("return modelLabel();")
@@ -538,13 +581,27 @@ class ChatDriver:
             raise BridgeError("The requested Copilot model changed before submission.")
         prompt_js = json.dumps(prompt)
         file_count = str(len(image_files))
-        if self._js("""
-          const edit = composer();
-          if (!edit || !accountGuard() || !onNewRoute() || normalize(draft(edit)) ||
-              turns().length || attachmentCount() !== """ + file_count + """) return false;
+        prepared = self._js("""
+          const edit = composer(), prompt = """ + prompt_js + """;
+          const ready = () => !!edit && composer() === edit && accountGuard() && onNewRoute() &&
+            !normalize(draft(edit)) && !turns().length && attachmentCount() === """ + file_count + """ &&
+            modelLabel() === """ + json.dumps(model_label) + """;
+          if (!ready()) return false;
           edit.focus();
-          return document.execCommand('insertText', false, """ + prompt_js + """);
-        """) is not True:
+          if (document.activeElement !== edit || !ready()) return false;
+          if (edit.id !== 'm365-chat-editor-target-element') return document.execCommand('insertText', false, prompt);
+          document.addEventListener('beforeinput', event => {
+            if (event.data === prompt && (event.target !== edit || document.activeElement !== edit || !ready())) {
+              event.preventDefault();
+              event.stopImmediatePropagation();
+            }
+          }, {capture: true, signal: AbortSignal.timeout(1500)});
+          return 'insert-text';
+        """)
+        if prepared == "insert-text":
+            self.session.call("Input.insertText", {"text": prompt})
+            self._pause()
+        elif prepared is not True:
             raise BridgeError("Copilot did not accept the prompt in the fresh chat.")
 
         # Click at most once. A retry after an ambiguous result could duplicate the send.
@@ -554,8 +611,10 @@ class ChatDriver:
               normalize(draft(edit)) !== normalize(""" + prompt_js + """) ||
               modelLabel() !== """ + json.dumps(model_label) + """ ||
               attachmentCount() !== """ + file_count + """) return null;
-          const button = named(/^(submit|send)(?: message)?$/i, composerGroup());
-          if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return false;
+          const matches = buttons(composerGroup()).filter(e => /^(submit|send)(?: message)?$/i.test(label(e)));
+          if (matches.length !== 1) return false;
+          const [button] = matches;
+          if (button.disabled || button.getAttribute('aria-disabled') === 'true') return false;
           button.click();
           return true;
         """
@@ -566,6 +625,8 @@ class ChatDriver:
             return result is True
 
         self._wait(submit, 35, "The Copilot send control did not become ready.")
+        self._wait(lambda: self._js("return turns().length > 0 || !composer() || !normalize(draft(composer()));") is True,
+                   12, "Copilot did not confirm submission of the draft.")
         previous = None
         while time.monotonic() < self.deadline:
             current = self._js("return (accountGuard() || accountVerified()) ? lastReply(" +
@@ -768,7 +829,7 @@ def _probe(settings):
     with ChatDriver(settings, time.monotonic() + min(10, settings.timeout)) as driver:
         model = driver.health()["model"]
     if model not in MODEL_LABELS:
-        raise BridgeError("The work account was verified, but the selected model is below the required floor or unavailable.")
+        raise BridgeError("The work account was verified, but the selected model is unsupported or unavailable.")
     print(f"Copilot desktop is ready. Selected model: {model}.", flush=True)
 
 

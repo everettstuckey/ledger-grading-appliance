@@ -11,7 +11,8 @@ from grading_schema import GRADING_INSTRUCTIONS, grading_fields, grading_json_sc
 
 
 COPILOT_DEFAULT_MODEL = "copilot/gpt-6.1-sol"
-COPILOT_MODELS = frozenset({COPILOT_DEFAULT_MODEL, "copilot/gpt-6-astra"})
+COPILOT_MODELS = frozenset({COPILOT_DEFAULT_MODEL, "copilot/gpt-6-astra", "copilot/gpt-5.6-sol"})
+COPILOT_MODEL_OPTIONS = ", ".join(sorted(COPILOT_MODELS))
 _LOOPBACK_URL = re.compile(r"http://127\.0\.0\.1:([0-9]{1,5})/?")
 _BEARER_TOKEN = re.compile(r"[A-Za-z0-9_-]{32,128}")
 _JSON_FENCE = re.compile(r"\x60{3}(?:json)?[ \t]*\r?\n(.*?)\r?\n\x60{3}", re.IGNORECASE | re.DOTALL)
@@ -45,7 +46,7 @@ class CopilotProvider:
     def respond(self, model, prompt, pngs, *, instructions="", grading_schema=None, master_image_count=0):
         model = model.lower()
         if model not in COPILOT_MODELS:
-            raise CopilotProviderError("invalid_request: Select copilot/gpt-6.1-sol or copilot/gpt-6-astra.")
+            raise CopilotProviderError(f"invalid_request: Copilot desktop supports {COPILOT_MODEL_OPTIONS}.")
         fields = grading_fields(grading_schema) if grading_schema is not None else None
         if not isinstance(prompt, str) or not isinstance(instructions, str):
             raise CopilotProviderError("invalid_request: Copilot desktop requires text instructions.")

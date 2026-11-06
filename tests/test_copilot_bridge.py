@@ -43,8 +43,9 @@ class ValidationTests(unittest.TestCase):
 
     def test_requires_exact_known_model_label(self):
         self.assertEqual(bridge._label_id("GPT-6.1 Sol Think deeper"), MODEL)
+        self.assertEqual(bridge._label_id("GPT-5.6 Sol Think"), "copilot/gpt-5.6-sol")
         self.assertEqual(bridge._label_id("GPT 6 Astra"), "copilot/gpt-6-astra")
-        for label in ("GPT-5.6 Sol Think deeper", "GPT 6.1 Sol preview", "Not GPT 6.1 Sol", "Auto"):
+        for label in ("GPT-5.5 Sol Think deeper", "GPT 6.1 Sol preview", "Not GPT 6.1 Sol", "Auto"):
             with self.subTest(label=label):
                 self.assertIsNone(bridge._label_id(label))
 
@@ -52,9 +53,11 @@ class ValidationTests(unittest.TestCase):
         prompt, pages, model = bridge._parse_review(json.dumps(PAYLOAD).encode())
         self.assertEqual((prompt, model), (PAYLOAD["prompt"], MODEL))
         self.assertEqual(pages, [(".png", base64.b64decode(PNG))])
+        fallback = dict(PAYLOAD, model="copilot/gpt-5.6-sol")
+        self.assertEqual(bridge._parse_review(json.dumps(fallback).encode())[2], fallback["model"])
         for changes in (
             {"allowed_models": ["Auto"]},
-            {"model": "copilot/gpt-5.6-sol"},
+            {"model": "copilot/gpt-5.5-sol"},
             {"prompt": ["unexpected"]},
             {"images_b64": ["data:image/png;base64," + PNG]},
             {"images_b64": [base64.b64encode(b"not a page").decode()]},
@@ -96,7 +99,7 @@ class ChatGateTests(unittest.TestCase):
         self.driver.session.call.assert_not_called()
         self.driver._select_model.assert_not_called()
 
-    def test_model_below_floor_never_uploads(self):
+    def test_different_model_never_uploads(self):
         self.driver._js = Mock(side_effect=[True, True, "GPT-5.6 Sol Think deeper"])
         with self.assertRaisesRegex(bridge.BridgeError, "before upload"):
             self.driver.review(PAYLOAD["prompt"], ["test.png"], MODEL)

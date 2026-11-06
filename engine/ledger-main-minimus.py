@@ -1767,7 +1767,7 @@ class LedgerGUI:
             win,
             text=("Enter the exact model ID.\n"
                   "Codex desktop: codex/gpt-6.1-sol or codex/gpt-6-astra\n"
-                  "Copilot desktop: copilot/gpt-6.1-sol or copilot/gpt-6-astra\n"
+                  "Copilot desktop: copilot/gpt-6.1-sol, copilot/gpt-6-astra, copilot/gpt-5.6-sol\n"
                   "Azure: gpt-6.1-sol or gpt-6-astra\n"
                   "Google: gemini-4-argon  |  Anthropic: claude-opus-4-8"),
             font=self.main_font, justify="center"

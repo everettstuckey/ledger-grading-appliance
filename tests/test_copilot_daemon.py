@@ -119,6 +119,22 @@ class CopilotDaemonTest(unittest.TestCase):
         self.assertEqual(response.status_code, 500)
         self.assertNotIn("text", response.get_json())
 
+    def test_configured_sol_56_routes_cached_grading(self):
+        model = "copilot/gpt-5.6-sol"
+        with self.env_path.open("a", encoding="utf-8") as config:
+            config.write(f"LEDGER_DEFAULT_MODEL={model}\n")
+        self.client = self.load_daemon().app.test_client()
+        health = self.client.get("/").get_json()
+        self.assertEqual(health["default_model"], model)
+        self.assertEqual(health["copilot_default_model"], model)
+
+        self.stage_context()
+        self.bridge.post.return_value = bridge_response({"results": [GRADE]}, model=model)
+        response = self.grade(image_b64=self.live)
+        self.assertEqual(response.get_json()["status"], "success")
+        self.assertEqual(json.loads(response.get_json()["text"]), [GRADE])
+        self.assert_request(model, self.master, self.live)
+
     def test_essay_override_and_boxed_grade_use_ordered_images(self):
         self.stage_context()
         self.bridge.post.return_value = bridge_response({"results": [GRADE]})
