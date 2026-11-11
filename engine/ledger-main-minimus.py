@@ -17,6 +17,7 @@ import csv
 import sqlite3
 import subprocess
 import shutil
+import sys
 import tempfile
 import re
 import base64
@@ -211,9 +212,16 @@ def _read_boxed_digits(gray, contour, thresh, lo=None, hi=None):
 # --- end [PATCH:boxed-digit-ocr] -------------------------------------------
 import getpass
 
-if os.name == "nt":
+IS_WINDOWS = os.name == "nt"
+IS_MACOS = sys.platform == "darwin"
+IS_LOCAL_DESKTOP = IS_WINDOWS or IS_MACOS
+
+if IS_LOCAL_DESKTOP:
     from ledger_tools import configure_tesseract, xelatex_command
-    from ledger_windows import WindowsRuntime, workspace_path
+    if IS_MACOS:
+        from ledger_local import LocalRuntime as DesktopRuntime, workspace_path
+    else:
+        from ledger_windows import WindowsRuntime as DesktopRuntime, workspace_path
 else:
     import grp
 
@@ -251,7 +259,7 @@ def _windows_report_name(name):
 
 
 # The Teacher's Siloed Workspace
-LEDGER_DIR = str(workspace_path()) if os.name == "nt" else os.path.join(HOME_DIR, "Ledger Workspace")
+LEDGER_DIR = str(workspace_path()) if IS_LOCAL_DESKTOP else os.path.join(HOME_DIR, "Ledger Workspace")
 
 # Siloed App Data (Hidden with a '.' to keep the teacher's visible workspace clean)
 TEMP_DIR = os.path.join(LEDGER_DIR, ".Temp-Ledger-Files")
@@ -945,7 +953,7 @@ class LedgerGUI:
             self.log_message(f"[!] Database Initialization Error: {e}")
 
     def _is_initializer(self):
-        """Allow setup for the Windows user or a Debian appliance initializer."""
+        """Allow setup for the desktop user or a Debian appliance initializer."""
         if self.runtime is not None:
             return True
         try:
@@ -957,7 +965,7 @@ class LedgerGUI:
             return False
 
     def check_first_run(self):
-        """Use the initialized marker for this Windows account or Debian appliance."""
+        """Use the initialized marker for this desktop account or Debian appliance."""
         marker = self.runtime.init_path if self.runtime is not None else '/etc/ledger-initialized'
         system_initialized = os.path.exists(marker)
         if system_initialized:
@@ -1077,8 +1085,9 @@ class LedgerGUI:
             ctk.CTkLabel(azure_frame, text=label, font=self.main_font).grid(row=row, column=0, sticky="w", padx=10)
             ctk.CTkEntry(azure_frame, font=self.main_font, width=350, textvariable=variable).grid(
                 row=row, column=1, pady=4)
-        azure_note = ("For Azure, sign in with Azure CLI as your Windows user." if self.runtime is not None
-                      else "For Azure, sign in with Azure CLI as the paragon user.")
+        azure_note = ("For Azure, sign in with Azure CLI under the account running Ledger."
+                      if self.runtime is not None else
+                      "For Azure, sign in with Azure CLI as the paragon user.")
         ctk.CTkLabel(azure_frame, text=azure_note, font=note_font).grid(
             row=2, column=0, columnspan=2, pady=(0, 4))
 
@@ -1088,13 +1097,13 @@ class LedgerGUI:
         ctk.CTkLabel(body, text="Open the handoff folder in Codex and use synthetic work for evaluation.",
                      font=note_font).pack(pady=(0, 8))
 
-        local_copilot_account = os.environ.get("LEDGER_COPILOT_LOCAL_ACCOUNT", "").strip() if self.runtime else ""
+        local_copilot_account = os.environ.get("LEDGER_COPILOT_LOCAL_ACCOUNT", "").strip() if IS_WINDOWS else ""
         if local_copilot_account:
             copilot_token_var = ctk.StringVar(value="")
             copilot_note = "Copilot on this PC is selected. Ledger will manage the bridge credential."
         else:
             _, copilot_token_var = _masked_row(body, "COPILOT BRIDGE TOKEN:")
-            copilot_note = ("For Copilot, start the bridge on this computer before grading." if self.runtime is not None
+            copilot_note = ("For Copilot, start the bridge on this computer before grading." if IS_WINDOWS
                             else "For Copilot, start the Windows bridge and SSH tunnel before grading.")
         ctk.CTkLabel(body, text=copilot_note, font=note_font).pack(pady=(0, 8))
 
@@ -1838,8 +1847,11 @@ class LedgerGUI:
 
         link = "codex://new?" + urlencode({"path": job_dir, "prompt": CODEX_HANDOFF_PROMPT})
         try:
-            if self.runtime is not None:
+            if IS_WINDOWS:
                 os.startfile(link)
+                return
+            if IS_MACOS:
+                subprocess.run(["/usr/bin/open", link], capture_output=True, timeout=3, check=True)
                 return
             handler = subprocess.run(["xdg-mime", "query", "default", "x-scheme-handler/codex"],
                                      capture_output=True, text=True, timeout=3, check=True)
@@ -1873,7 +1885,7 @@ class LedgerGUI:
 
         warn_label = ctk.CTkLabel(
             warn_frame,
-            text=("Reset removes Ledger's provider settings and keys for this Windows account.\n"
+            text=("Reset removes Ledger's provider settings and keys for this user account.\n"
                   "Your grading workspace stays in place." if self.runtime is not None else
                   "WARNING!\n\nFactory reset removes Ledger's provider settings and keys\n"
                   "and re-locks the appliance. Azure CLI sign-in is separate.\n"
@@ -5001,11 +5013,11 @@ class LedgerGUI:
             self.model_btn.configure(state="normal")
         self.log_message("=== BATCH PROCESSING CONCLUDED. ===")
 
-def _run_windows():
+def _run_desktop():
     root = ctk.CTk()
     root.withdraw()
     try:
-        with WindowsRuntime() as runtime:
+        with DesktopRuntime() as runtime:
             startup_error = None
             if runtime.init_path.is_file():
                 try:
@@ -5022,11 +5034,10 @@ def _run_windows():
         root.destroy()
 
 
-if __name__ == "__main__" and os.name == "nt":
-    _run_windows()
+if __name__ == "__main__" and IS_LOCAL_DESKTOP:
+    _run_desktop()
 elif __name__ == "__main__":
     import socket
-    import sys
     
     # --- PARAGON SINGLE INSTANCE LOCK ---
     try:

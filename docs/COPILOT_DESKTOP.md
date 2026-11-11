@@ -45,7 +45,7 @@ Use manual setup when Ledger and Copilot run on different machines or when maint
 4. From the repository, run `python bridge/copilot/copilot_bridge.py --probe` to verify the account and selected model. Then run `python bridge/copilot/copilot_bridge.py` to start the bridge on `127.0.0.1:8790`.
 5. Enter the same token in Ledger's **System Initialization** screen. For an existing Debian installation, use the upgrade steps below.
 
-For a separate Debian appliance, forward the bridge port through an existing approved SSH connection to the Windows computer. Keep the tunnel open while grading.
+From a separate Ledger host, including macOS or Debian, forward the bridge port through an existing approved SSH connection to the Windows computer. Keep the tunnel open while grading.
 
 ~~~bash
 ssh -NT -o ExitOnForwardFailure=yes -L 127.0.0.1:8790:127.0.0.1:8790 operator@windows-host

@@ -7,14 +7,26 @@ The Ledger is an experimental reference implementation of an AI-assisted system 
 
 This repository is published so that **IT, data-privacy, and instructional-technology staff** at schools and districts can study the design, build it in a test environment, and decide whether it merits further development under their own institution's policies. Nothing here is a recommendation to deploy it.
 
-It was built and tested in October 2026 on Debian 13.7 running on a Lenovo ThinkCentre M700 Tiny. *Patent pending.*
+The original appliance was built and tested in October 2026 on Debian 13.7 running on a Lenovo ThinkCentre M700 Tiny. *Patent pending.*
 
 ---
 
 ## Before you evaluate
 
 - **Get approval first.** Do not install or run this software on any network, or with any real student work, without the approvals your district or institution requires.
-- **Use test material.** This build is not hardened — an ordinary Debian desktop, no disk encryption — and AI output can be wrong. Evaluate with blank or synthetic documents, and have a licensed educator review every score before it is used. See [SECURITY.md](SECURITY.md).
+- **Use test material.** Evaluate with blank or synthetic documents, and have a licensed educator review every score before it is used. See [SECURITY.md](SECURITY.md).
+
+## Install Ledger
+
+All three builds are available from this repository. Clone it or [download the source ZIP](https://github.com/everettstuckey/ledger-grading-appliance/archive/refs/heads/main.zip), then follow the guide for your operating system.
+
+| Operating system | Setup guide | Launcher or installer |
+|---|---|---|
+| Windows | [Windows desktop setup](docs/WINDOWS.md) | `Start-Ledger.ps1` |
+| macOS | [macOS desktop setup](docs/MACOS.md) | `Start-Ledger.command` |
+| Linux | [Debian 13 appliance setup](docs/INSTALL.md) | `build-ledger.sh` |
+
+The Linux installer targets Debian 13 with the Xfce desktop on a dedicated test machine. Use a scanner that produces PDFs. The [hardware guide](docs/HARDWARE.md) records the original Linux test system.
 
 ## How it works
 
@@ -46,20 +58,6 @@ The ID box is intended to hold a pseudonym assigned by the operator. The roster 
 What a provider does with images after they leave the machine depends on its terms. Those terms differ by account type and change over time. Have your institution review the terms before configuring a provider.
 
 When a Google AI Studio key is entered, the setup screen requires the operator to confirm that billing is enabled on the key's project and links to Google's terms. All provider charges appear on the account whose key is entered.
-
-## Building a test machine
-
-Ledger also runs as a native Windows desktop app. [Windows setup](docs/WINDOWS.md).
-
-| Item | Notes |
-|---|---|
-| A small-form-factor PC dedicated to testing | The reference build is a Lenovo ThinkCentre M700 10HY002AUS. Any SSD. |
-| Debian 13 with the Xfce desktop | The build script checks for Debian 13 and refuses anything else. |
-| A monitor, keyboard and mouse | |
-| A scanner that produces PDF | |
-| Access to an AI provider | Use an account your institution controls. Azure OpenAI uses an Entra sign-in and model deployment. |
-
-The build procedure is **[docs/INSTALL.md](docs/INSTALL.md)**. It assumes a technically qualified operator and a machine that holds nothing else of value.
 
 ## Scoring instructions
 

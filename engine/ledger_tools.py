@@ -57,6 +57,14 @@ def _windows_candidates(name):
         yield directory / "bin" / "win32" / executable
 
 
+def _macos_candidates(name):
+    if name == "xelatex":
+        yield Path("/Library/TeX/texbin") / name
+    for directory in (Path.home() / ".local" / "bin", Path("/opt/homebrew/bin"),
+                      Path("/usr/local/bin"), Path("/opt/local/bin")):
+        yield directory / name
+
+
 def _is_executable(path):
     try:
         return path.is_absolute() and path.is_file() and os.access(path, os.X_OK)
@@ -77,8 +85,13 @@ def _resolve(name, setting, install):
         for path in _windows_candidates(name):
             if _is_executable(path):
                 return str(path)
-    elif command := shutil.which(name):
-        return os.path.abspath(command)
+    else:
+        if command := shutil.which(name):
+            return os.path.abspath(command)
+        if sys.platform == "darwin":
+            for path in _macos_candidates(name):
+                if _is_executable(path):
+                    return str(path)
 
     raise ToolNotFoundError(f"Install {install} or set {setting} to the full path of the executable.")
 

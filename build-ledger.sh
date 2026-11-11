@@ -46,6 +46,9 @@ DAEMON_COPILOT_MD5="1f4c82c7e36e02df85289553868634f1"
 COPILOT_PROVIDER_MD5="68ec2132350a8a022b4f9ef6de50bddc"
 GUI_WINDOWS_MD5="5e4e91c08b2192a41c3e5f9e46acab32"
 DAEMON_WINDOWS_MD5="3c983d3ecb3f2103d0bd71976e7a873b"
+GUI_MACOS_MD5="d2f7e095fe2c95d3362fda39995ce5f7"
+DAEMON_MACOS_MD5="5ddef522654423041bf92502156e6f96"
+COPILOT_PROVIDER_MACOS_MD5="7983a17c5769d00341227cc81f6c0251"
 
 APT_PKGS=(python3-venv python3-tk python3-dev tesseract-ocr tesseract-ocr-eng zenity wmctrl
           texlive-xetex texlive-latex-extra texlive-science texlive-fonts-recommended
@@ -107,6 +110,9 @@ COPILOT_BUILD=0
 if [[ ( "$GUI_NOW" == "$GUI_COPILOT_MD5" && "$DAEMON_NOW" == "$DAEMON_COPILOT_MD5" ) ||
       ( "$GUI_NOW" == "$GUI_WINDOWS_MD5" && "$DAEMON_NOW" == "$DAEMON_WINDOWS_MD5" ) ]]; then
     check_source_md5 daemon/copilot_provider.py "$COPILOT_PROVIDER_MD5"
+    COPILOT_BUILD=1
+elif [[ "$GUI_NOW" == "$GUI_MACOS_MD5" && "$DAEMON_NOW" == "$DAEMON_MACOS_MD5" ]]; then
+    check_source_md5 daemon/copilot_provider.py "$COPILOT_PROVIDER_MACOS_MD5"
     COPILOT_BUILD=1
 fi
 if (( COPILOT_BUILD )) || [[ "$GUI_NOW" == "$GUI_CODEX_MD5" && "$DAEMON_NOW" == "$DAEMON_CODEX_MD5" ]]; then

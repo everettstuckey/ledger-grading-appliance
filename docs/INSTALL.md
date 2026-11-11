@@ -1,6 +1,6 @@
 # Building an Evaluation Machine
 
-For the native Windows app, see [Windows setup](WINDOWS.md). The appliance installation below uses Debian.
+These instructions cover the Linux appliance on Debian 13. For the desktop apps, see [Windows setup](WINDOWS.md) or [macOS setup](MACOS.md).
 
 > Experimental software for evaluation by school and district IT professionals; see [DISCLAIMER.md](../DISCLAIMER.md).
 > These steps build a **test** machine with no disk encryption, hardware-key login or kiosk lockdown. Use test material, and get the approvals your institution requires before processing any student work.
@@ -27,7 +27,7 @@ This procedure is written for a technically qualified operator setting up a dedi
    ```
 3. Download this repository into your home folder:
    ```
-   git clone https://github.com/MOChemistry/ledger-grading-appliance.git
+   git clone https://github.com/everettstuckey/ledger-grading-appliance.git
    ```
    Success: a folder named `ledger-grading-appliance` appears in your home folder.
 4. Move into it:
